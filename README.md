@@ -230,7 +230,7 @@ separate agent, `com.sessionaligner.ping`).
   automation didn't register. Check: are you logged into Claude Code with your
   Pro/Max account (`claude` then `/login`)? Is `expect` installed (`which expect`
   - on macOS it's `/usr/bin/expect`)? Note that headless API/`claude -p` pings
-  (including `ping_api.py`) will never start the subscription window by design.
+  will never start the subscription window by design.
 - **"expect not found":** install Xcode Command Line Tools (`xcode-select
   --install`); macOS normally ships `expect` at `/usr/bin/expect`.
 - **Check the schedule by hand:** the schedule is a launchd agent named
@@ -248,18 +248,3 @@ separate agent, `com.sessionaligner.ping`).
 > It does **not** give you more usage — it just lines the windows up with your
 > day. To change times run `./aligner.sh times "07:00 12:00 17:00"`, to pause it
 > run `./aligner.sh off`, and to check it run `./aligner.sh status`.
-
----
-
-## Optional: API-billing version (advanced, usually NOT what you want)
-
-If you ever want to ping using a **paid Anthropic API key** instead of your
-Claude Code subscription, there's `ping_api.py`. Note this spends API credits
-and lives in a **separate billing pool** — it does **not** touch your Claude
-Code subscription's 5-hour window. Most people should ignore this and use the
-default `./aligner.sh` flow above.
-
-```bash
-export ANTHROPIC_API_KEY="sk-ant-..."
-python3 ping_api.py
-```
