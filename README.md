@@ -13,6 +13,48 @@ It uses your normal Claude Code login (the same account you already use). No API
 key and no programming required. The schedule runs through macOS `launchd`, which
 survives reboots and can run a missed ping when your Mac wakes from sleep.
 
+## TL;DR
+
+Session Aligner starts Claude's 5-hour window at the times you choose.
+
+Recommended default:
+
+```
+05:00 10:00 15:00
+```
+
+These are **START** times. For example, `05:00` starts a Claude window around
+05:00. It does **not** increase your usage limits or give extra usage - it only
+lines up your existing Claude window with your day.
+
+Install (creates a global `session-aligner` command):
+
+```bash
+./install.sh
+```
+
+After install, run it from anywhere:
+
+```bash
+session-aligner status
+session-aligner test
+session-aligner times "05:00 10:00 15:00"
+```
+
+Optional auto-wake (so pings fire even while the Mac sleeps):
+
+```bash
+session-aligner wake on
+```
+
+Auto-wake asks for your Mac password **once** because macOS requires admin/root
+access to schedule system wake events (via `pmset`). Your password is handled by
+macOS `sudo` and is **not** stored by Session Aligner. The normal ping schedule
+runs as you and needs no admin access.
+
+Didn't run `./install.sh`? Everything also works from this folder with
+`./aligner.sh` instead of `session-aligner` (for example `./aligner.sh status`).
+
 ## How it actually works (read this once)
 
 A few things that are surprising at first but important to understand:
@@ -55,48 +97,59 @@ A few things that are surprising at first but important to understand:
 ## One-time setup (copy/paste)
 
 1. Open the Terminal app.
-2. Go to this folder and make the scripts runnable:
+2. Go to this folder and run the installer:
 
 ```bash
 cd /Users/connormcneil/Projects/session-maxxing
-chmod +x ping.sh aligner.sh
+./install.sh
 ```
 
-3. Test that it works (sends one ping right now):
+The installer makes the scripts runnable, checks requirements (Claude Code,
+`expect`), and creates a global `session-aligner` command so you can run it from
+anywhere. It then offers to run guided setup for you.
+
+> Creating the global command may ask for your Mac password once (because
+> `/usr/local/bin` is owned by the system). If you skip or it can't be created,
+> everything still works from this folder using `./aligner.sh` instead.
+
+3. Run guided setup (the installer offers this, or run it yourself):
 
 ```bash
-./aligner.sh test
+session-aligner setup
+```
+
+It asks whether to use the recommended **05:00 10:00 15:00** window starts, every
+day or weekdays, and whether to enable auto-wake. Press Enter to accept the
+recommended answers.
+
+4. Check it's scheduled:
+
+```bash
+session-aligner status
+```
+
+5. Send a test ping right now (optional):
+
+```bash
+session-aligner test
 ```
 
 You should see a short reply from Claude and a `SUCCESS` line. If you see a
-`FAILURE` line, it tells you what's wrong (for example "not logged in").
+`FAILURE` line, it tells you what's wrong (for example "not logged in"). You can
+also run `session-aligner doctor` any time to diagnose problems.
 
-4. Turn on your schedule:
+### About auto-wake and your Mac password
 
-```bash
-./aligner.sh setup
-```
+Auto-wake (`session-aligner wake on`) makes the Mac wake ~2 minutes before **every**
+window start so pings fire even while you're asleep. It installs a tiny background
+helper that keeps the upcoming wakes scheduled automatically — you don't have to
+run it again.
 
-It will ask "every day or weekdays?" and ask for your times. Press Enter to
-accept the default of **05:00 10:00 15:00 every day**.
-
-5. Check it's scheduled:
-
-```bash
-./aligner.sh status
-```
-
-6. (Optional but recommended) Let the Mac wake itself so pings fire even while
-   you're asleep:
-
-```bash
-./aligner.sh wake on
-```
-
-This asks for your Mac password once, installs a tiny background helper, and makes
-the Mac wake ~2 minutes before **every** ping time. The helper keeps the upcoming
-wakes scheduled automatically — you don't have to run it again. See "Will it run
-while the Mac is asleep?" below.
+It asks for your Mac password once because **macOS requires admin/root access to
+schedule system wake events** through `pmset`. Your password is handled by macOS
+`sudo` and is **not** stored by Session Aligner, and the helper never touches your
+Claude account. The normal ping schedule runs as you and needs no admin access.
+See "Will it run while the Mac is asleep?" below.
 
 ---
 
@@ -104,33 +157,55 @@ while the Mac is asleep?" below.
 
 | What you want | Command |
 | --- | --- |
-| Send a ping right now (test) | `./aligner.sh test` |
-| Change the times | `./aligner.sh times "06:00 11:00 16:00"` |
-| Turn the schedule OFF | `./aligner.sh off` |
-| Turn the schedule back ON | `./aligner.sh on` |
-| See schedule + recent activity | `./aligner.sh status` |
-| Auto-wake the Mac before each ping | `./aligner.sh wake on` |
-| Stop the auto-wake helper | `./aligner.sh wake off` |
-| See the helper + upcoming wakes | `./aligner.sh wake status` |
+| Send a test ping right now | `session-aligner test` |
+| Change the window start times | `session-aligner times "06:00 11:00 16:00"` |
+| Turn the schedule OFF | `session-aligner stop` |
+| Turn the schedule back ON | `session-aligner start` |
+| See a friendly status overview | `session-aligner status` |
+| See the next window start + wake | `session-aligner next` |
+| Diagnose problems | `session-aligner doctor` |
+| Fix common problems | `session-aligner repair` |
+| Show recent activity / logs | `session-aligner logs` |
+| Auto-wake before each window start | `session-aligner wake on` |
+| Stop the auto-wake helper | `session-aligner wake off` |
+| See the helper + upcoming wakes | `session-aligner wake status` |
+| Remove everything | `session-aligner uninstall` |
 
-Always run these from inside the folder
-`/Users/connormcneil/Projects/session-maxxing` (do the `cd` line from setup
-first).
+If you didn't run `./install.sh`, use `./aligner.sh` instead of `session-aligner`
+(for example `./aligner.sh status`), run from inside the folder
+`/Users/connormcneil/Projects/session-maxxing`. `start`/`stop` are the same as the
+older `on`/`off`, which still work too.
 
 ## Example schedules
 
-- **3 windows a day (default):** `05:00 10:00 15:00` — covers about 5am to 8pm.
-- **Weekdays, two blocks:** run `./aligner.sh setup`, choose "weekdays", enter
+Recommended window starts:
+
+```
+05:00 10:00 15:00
+```
+
+These are **START** times. With the default schedule:
+
+- `05:00` starts the early window
+- `10:00` starts the late morning window
+- `15:00` starts the afternoon window
+
+Together they cover roughly 5am to 8pm. This does not give you more usage — it only
+aligns the existing windows with your day.
+
+Other examples:
+
+- **Weekdays, two blocks:** run `session-aligner setup`, choose "weekdays", enter
   `09:00 14:00`.
-- **Every 5 hours from 8am:** `./aligner.sh times "08:00 13:00 18:00 23:00"`.
+- **Every 5 hours from 8am:** `session-aligner times "08:00 13:00 18:00 23:00"`.
 
 ## How do I know it's working?
 
 Easiest proof - the log. Every ping now writes its real token usage to
 `aligner.log`:
 
-1. Run a ping: `./aligner.sh test`.
-2. Look at the log: `./aligner.sh status` (or open `aligner.log`). You should see
+1. Run a ping: `session-aligner test`.
+2. Look at the log: `session-aligner logs` (or open `aligner.log`). You should see
    lines like:
 
 ```text
@@ -147,7 +222,7 @@ window (only happens when no window is currently active):
 
 1. Make sure no window is active (in Claude Code, `/usage` says "Starts when a
    message is sent").
-2. Run `./aligner.sh test`, then run `/usage` again.
+2. Run `session-aligner test`, then run `/usage` again.
 3. **Current session** should now show an active window that **resets ~5 hours
    from now**. That before -> after flip is the definitive proof.
 
@@ -163,12 +238,17 @@ match your real day.
 
 ## Will it run while the Mac is asleep?
 
-A sleeping Mac can't ping on its own, so `./aligner.sh wake on` installs a small
-background helper that schedules a wake ~2 minutes before **every** ping time
+A sleeping Mac can't ping on its own, so `session-aligner wake on` installs a small
+background helper that schedules a wake ~2 minutes before **every** window start
 (e.g. 04:58, 09:58, 14:58 for the default 05:00/10:00/15:00). macOS only allows one
 *repeating* wake per day, so the helper keeps a few days of one-time wakes lined up
 and refreshes them every hour (and whenever the Mac wakes). You set it up once and
 forget it.
+
+This is also the only part of the tool that needs your Mac password: scheduling
+system wake events requires admin/root access through `pmset`. The password is
+handled by macOS `sudo`, is never stored, and the helper does not use your Claude
+account.
 
 Whether a scheduled wake actually fires depends on power:
 
@@ -179,28 +259,28 @@ Whether a scheduled wake actually fires depends on power:
 | Lid closed, **on battery** | No — macOS blocks scheduled wakes to save battery |
 | Fully shut down | No |
 
-So: **leave the Mac plugged in** and every ping will fire even with the lid closed.
-If your Mac is closed and unplugged, the only fully reliable option is to run this
-on an always-on machine logged into the same Claude account.
+So: **leave the Mac plugged in** and every window start will fire even with the lid
+closed. If your Mac is closed and unplugged, the only fully reliable option is to
+run this on an always-on machine logged into the same Claude account.
 
-Check the helper and the upcoming wakes with `./aligner.sh wake status` (it lists
-each scheduled wake). The helper logs each refresh to `wake.log` and
+Check the helper and the upcoming wakes with `session-aligner wake status` (it
+lists each scheduled wake). The helper logs each refresh to `wake.log` and
 `wake.daemon.log` in the project folder.
 
 ### Why the wakes never run out (how it actually works)
 
-When you run `./aligner.sh wake status` you'll only see the next **few days** of
+When you run `session-aligner wake status` you'll only see the next **few days** of
 wakes, not the whole future. That's intentional, and the schedule still continues
 forever. Here's why:
 
 - macOS only allows **one** *repeating* wake per day (via `pmset repeat`). That's
-  not enough for 3 ping times, so instead we use **one-time** wake events and keep
-  topping them up.
-- `./aligner.sh wake on` installs a tiny background helper (a root LaunchDaemon
+  not enough for 3 window starts, so instead we use **one-time** wake events and
+  keep topping them up.
+- `session-aligner wake on` installs a tiny background helper (a root LaunchDaemon
   called `com.sessionaligner.wake`) that re-runs `schedule-wakes.sh` **every hour**,
   **at startup**, and **whenever the Mac wakes**.
 - Each time it runs, it makes sure the next ~3 days of wakes (2 minutes before each
-  ping time) are scheduled, adding only the ones that are missing.
+  window start) are scheduled, adding only the ones that are missing.
 - One-time wakes disappear automatically after they fire, so the list stays short
   and is constantly pushed forward — today's run schedules out to day 3, tomorrow's
   run adds day 4, and so on, with no end.
@@ -220,23 +300,26 @@ separate agent, `com.sessionaligner.ping`).
 - **"claude command not found":** Install Claude Code and run it once so you're
   logged in, then try again.
 - **"not logged in":** In Terminal run `claude`, then `/login`.
+- **Quickest check:** run `session-aligner doctor` — it lists what's wrong and the
+  exact commands to fix it.
 - **Pings don't fire on schedule (but `test` works):**
-  - Make sure the agent is loaded: `./aligner.sh status` should say `Schedule: ON`.
+  - Make sure the agent is loaded: `session-aligner status` should say `Schedule: ON`.
   - If the time passed while the Mac was asleep/unplugged, see the table above,
-    make sure `./aligner.sh wake on` is set up, and keep the Mac plugged in.
+    make sure `session-aligner wake on` is set up, and keep the Mac plugged in.
   - macOS may need permission: **System Settings > Privacy & Security > Full Disk
     Access** and add **Terminal**.
 - **`test` says SUCCESS but `/usage` shows no session started:** the interactive
   automation didn't register. Check: are you logged into Claude Code with your
   Pro/Max account (`claude` then `/login`)? Is `expect` installed (`which expect`
-  - on macOS it's `/usr/bin/expect`)? Note that headless API/`claude -p` pings
-  will never start the subscription window by design.
+  - on macOS it's `/usr/bin/expect`)? The ping uses **interactive** Claude Code
+  driven through a pseudo-terminal (`expect`); headless `claude -p` pings will never
+  start the subscription window by design.
 - **"expect not found":** install Xcode Command Line Tools (`xcode-select
   --install`); macOS normally ships `expect` at `/usr/bin/expect`.
 - **Check the schedule by hand:** the schedule is a launchd agent named
   `com.sessionaligner.ping` (file at `~/Library/LaunchAgents/`). List it with
   `launchctl list | grep sessionaligner`. Don't edit the file by hand — use
-  `./aligner.sh times` instead.
+  `session-aligner times` instead.
 
 ---
 
@@ -246,5 +329,6 @@ separate agent, `com.sessionaligner.ping`).
 > session window begins at your first message and lasts 5 hours; this sends a
 > tiny "hi" at set times (like 5am, 10am, 3pm) so a fresh window opens then.
 > It does **not** give you more usage — it just lines the windows up with your
-> day. To change times run `./aligner.sh times "07:00 12:00 17:00"`, to pause it
-> run `./aligner.sh off`, and to check it run `./aligner.sh status`.
+> day. Install it with `./install.sh`, then to change times run
+> `session-aligner times "07:00 12:00 17:00"`, to pause it run `session-aligner
+> stop`, and to check it run `session-aligner status`.
