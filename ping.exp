@@ -1,0 +1,65 @@
+#!/usr/bin/expect -f
+#
+# ping.exp - Drive the INTERACTIVE Claude Code TUI to send one tiny message.
+#
+# Why interactive (not `claude -p`): since the June 15, 2026 billing split,
+# headless `claude -p` no longer counts toward the Pro/Max 5-hour subscription
+# session window (it bills a separate metered pool). Only interactive Claude
+# Code starts that window. This drives the real interactive TUI via a pty so the
+# ping uses the interactive/subscription path.
+#
+# Usage: expect ping.exp /absolute/path/to/claude
+#
+# It types "hi", waits for the request to dispatch, then exits cleanly.
+
+set timeout 30
+
+# First arg = absolute path to the claude binary (resolved by ping.sh).
+if {[llength $argv] < 1} {
+  puts "ERROR: missing path to claude binary"
+  exit 2
+}
+set claude [lindex $argv 0]
+
+# Show the child's output so ping.sh can capture it for logging/diagnostics.
+log_user 1
+
+# Launch the interactive TUI with the cheapest model. No -p (that would be
+# headless and would not start the subscription window).
+spawn $claude --model haiku
+
+# The TUI can open with a per-folder "Do you trust the files in this folder?"
+# prompt the first time. Watch briefly (short timeout) and accept it if it shows;
+# otherwise fall through quickly once the folder is already trusted.
+set timeout 8
+expect {
+  -re {(?i)do you trust|trust the files|proceed} {
+    send "\r"
+    exp_continue
+  }
+  timeout { }
+  eof { puts "ERROR: claude exited before prompt"; exit 1 }
+}
+
+# Restore a generous timeout for the exit wait below.
+set timeout 30
+
+# Give the input box a moment to be ready, then send the ping message.
+sleep 3
+send "hi\r"
+
+# Let the message actually dispatch to the server (this is what starts the
+# window) and the model begin replying. We do not need the full reply.
+sleep 10
+
+# Exit cleanly and quickly: Ctrl-C interrupts any in-progress reply and clears
+# the input, then the /exit slash command quits the TUI.
+send "\x03"
+sleep 1
+send "/exit\r"
+
+# Wait for it to quit; if it lingers, force the pty closed so we never hang.
+expect {
+  eof { }
+  timeout { close }
+}

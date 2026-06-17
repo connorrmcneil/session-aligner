@@ -1,0 +1,6 @@
+# Runtime logs
+aligner.log
+aligner.launchd.log
+
+# macOS
+.DS_Store
