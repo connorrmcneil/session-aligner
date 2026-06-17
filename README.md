@@ -13,15 +13,37 @@ It uses your normal Claude Code login (the same account you already use). No API
 key and no programming required. The schedule runs through macOS `launchd`, which
 survives reboots and can run a missed ping when your Mac wakes from sleep.
 
-> **How the ping works (and an honest caveat).** On June 15, 2026 Anthropic
-> changed billing so that *headless* `claude -p` calls no longer start your Pro/Max
-> 5-hour session window (they bill a separate metered pool). Only an
-> *interactive* Claude Code session starts that window. So this tool drives the
-> real interactive Claude Code app through a pseudo-terminal (`expect`) and types
-> a single "hi". This is the best available way to start the window on a schedule,
-> but it is automating the interactive app: it may be against the spirit of that
-> billing change and Anthropic could stop it working at any time. Always confirm
-> it is actually working with the check below, rather than assuming.
+## How it actually works (read this once)
+
+A few things that are surprising at first but important to understand:
+
+- **The 5-hour window belongs to your ACCOUNT, not to a folder or project.** It is
+  shared across every Claude Code project, claude.ai, and Claude Desktop. There is
+  only one window at a time. Starting it from this tool's folder starts it
+  everywhere.
+- **Each ping is its own separate, short-lived Claude Code session.** The ping
+  opens a brand-new session, types "hi", waits for the reply, and closes - all in
+  about 20 seconds, invisibly in the background. That single "hi" is the "first
+  message" that starts a fresh 5-hour window at the time you chose.
+- **That's why `/usage` in your own session doesn't seem to "move".** The numbers
+  at the top of `/usage` describe the session you are currently sitting in. The
+  ping ran in a different session that has already closed, so opening a fresh one
+  to check shows nothing for it. The window and limits it affected are still
+  account-wide, though - they just aren't shown per-session.
+- **The ping is intentionally tiny**, so the percentage bars in `/usage` barely
+  budge. Do not judge it by the percentages. The real proof is: (a) the
+  **`TOKENS:` line written to `aligner.log` on every ping** (showing real input/
+  output tokens were used), and (b) the **"Current session - Resets at H:MM"**
+  time, which jumps ~5 hours ahead when a ping starts a fresh window.
+
+> **Honest caveat.** On June 15, 2026 Anthropic changed billing so that *headless*
+> `claude -p` calls no longer start your Pro/Max 5-hour window (they bill a
+> separate metered pool). Only an *interactive* Claude Code session starts that
+> window. So this tool drives the real interactive app through a pseudo-terminal
+> (`expect`) and types "hi". This is the best available way to start the window on
+> a schedule, but it is automating the interactive app: it may be against the
+> spirit of that billing change and Anthropic could stop it working at any time.
+> Always confirm it is working using the log/`/usage` checks below.
 
 ---
 
@@ -101,18 +123,33 @@ first).
 
 ## How do I know it's working?
 
-The `SUCCESS` line in the log only means the ping ran without errors. The
-**authoritative** check is whether your 5-hour session actually started:
+Easiest proof - the log. Every ping now writes its real token usage to
+`aligner.log`:
 
 1. Run a ping: `./aligner.sh test`.
-2. Right after, open Claude Code and run `/usage` (or open **Settings > Usage**).
-3. Look at **Current session**. If it shows an active window that **resets about
-   5 hours from now**, the ping worked. If it still says "Starts when a message
-   is sent" / 0% with no reset time, the ping did **not** start the window (see
-   Troubleshooting).
+2. Look at the log: `./aligner.sh status` (or open `aligner.log`). You should see
+   lines like:
 
-The log (`./aligner.sh status` or the `aligner.log` file) also gets a `SUCCESS`
-line at each scheduled time, which confirms the schedule fired.
+```text
+... SESSION: Resets 12:30pm | 18% used
+... SUCCESS: interactive ping sent (5-hour window should now be open). TOKENS: input=10 output=168 cache_read=11856 | reply: "Hey! I'm ready to help..."
+```
+
+   An `output=` number greater than 0 means Claude actually answered - real tokens
+   were spent through your subscription. That is your everyday "it's working"
+   signal.
+
+Authoritative check - the reset time. To confirm a ping actually *started* a new
+window (only happens when no window is currently active):
+
+1. Make sure no window is active (in Claude Code, `/usage` says "Starts when a
+   message is sent").
+2. Run `./aligner.sh test`, then run `/usage` again.
+3. **Current session** should now show an active window that **resets ~5 hours
+   from now**. That before -> after flip is the definitive proof.
+
+(Remember: don't expect the percentage bars to jump - the ping is tiny. Judge it
+by the `TOKENS:` line and the reset time, not the percentages.)
 
 ## How many pings should I use?
 

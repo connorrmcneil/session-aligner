@@ -92,6 +92,62 @@ else
 fi
 SNIPPET="$(printf '%s' "$CLEAN" | tr '\n' ' ' | tr -s ' ' | cut -c1-160)"
 
+# --- Proof extraction (best-effort) ---------------------------------------
+# 1) Session/reset line from the captured /usage panel. The TUI strips spaces
+#    when it renders, so match loosely on "Resets ..." and "NN% used".
+SESSION_LINE="$(printf '%s' "$CLEAN" | grep -ioE 'resets[^|]{0,40}' | head -1 | tr -s ' ')"
+PCT="$(printf '%s' "$CLEAN" | grep -ioE '[0-9]+% ?used' | head -1)"
+
+# 2) Exact token usage from the transcript this ping just created. The numbers
+#    are NOT in /usage; they live in the session JSONL as a `usage` field.
+PROJ="${HOME}/.claude/projects/$(printf '%s' "$SCRIPT_DIR" | sed 's#/#-#g')"
+TOKENS_LINE=""
+if command -v python3 >/dev/null 2>&1; then
+  TOKENS_LINE="$(python3 - "$PROJ" <<'PY' 2>/dev/null
+import sys, os, glob, json
+proj = sys.argv[1]
+files = sorted(glob.glob(os.path.join(proj, '*.jsonl')), key=os.path.getmtime) if os.path.isdir(proj) else []
+if not files:
+    base = os.path.expanduser('~/.claude/projects')
+    files = sorted(glob.glob(os.path.join(base, '*', '*.jsonl')), key=os.path.getmtime)
+if not files:
+    sys.exit(0)
+usage = None
+reply = ''
+for line in open(files[-1]):
+    try:
+        o = json.loads(line)
+    except Exception:
+        continue
+    if o.get('type') != 'assistant':
+        continue
+    msg = o.get('message', {}) if isinstance(o.get('message'), dict) else {}
+    u = msg.get('usage')
+    c = msg.get('content')
+    txt = ''
+    if isinstance(c, list):
+        for b in c:
+            if isinstance(b, dict) and b.get('type') == 'text':
+                txt += b.get('text', '')
+    if u:
+        usage = u
+    if txt.strip():
+        reply = txt.strip()
+if not usage:
+    sys.exit(0)
+def g(k):
+    try:
+        return int(usage.get(k, 0) or 0)
+    except Exception:
+        return 0
+reply = reply.replace('\n', ' ')[:80]
+print('input=%d output=%d cache_read=%d cache_write=%d | reply: "%s"' % (
+    g('input_tokens'), g('output_tokens'),
+    g('cache_read_input_tokens'), g('cache_creation_input_tokens'), reply))
+PY
+)"
+fi
+
 # Decide outcome. Interactive exit (Ctrl-C) is normal, so a non-login/non-network
 # run that completed is treated as success.
 if [ "$STATUS" -eq 124 ]; then
@@ -107,7 +163,12 @@ elif printf '%s' "$CLEAN" | grep -qiE 'claude exited before prompt|ERROR: missin
   log "FAILURE: could not start the interactive session. Output: ${SNIPPET}"
   exit 1
 else
-  log "SUCCESS: interactive ping sent (subscription 5-hour window should now be open). Snippet: ${SNIPPET:-(none)}"
-  log "INFO: verify with /usage in Claude Code (or Settings > Usage) - look for an active 'Current session'."
+  [ -n "$SESSION_LINE" ] && log "SESSION: ${SESSION_LINE}${PCT:+ | ${PCT}}"
+  if [ -n "$TOKENS_LINE" ]; then
+    log "SUCCESS: interactive ping sent (5-hour window should now be open). TOKENS: ${TOKENS_LINE}"
+  else
+    log "SUCCESS: interactive ping sent (5-hour window should now be open). Snippet: ${SNIPPET:-(none)}"
+    log "INFO: could not read token usage from transcript; verify with /usage in Claude Code."
+  fi
   exit 0
 fi
