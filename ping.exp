@@ -10,7 +10,9 @@
 #
 # Usage: expect ping.exp /absolute/path/to/claude
 #
-# It types "hi", waits for the request to dispatch, then exits cleanly.
+# It types "hi", waits for Claude's reply to FULLY complete, then exits cleanly.
+# (It must not interrupt the reply: an interrupted turn produces ~0 tokens and
+# may not reliably start the 5-hour window.)
 
 set timeout 30
 
@@ -48,17 +50,42 @@ set timeout 30
 sleep 3
 send "hi\r"
 
-# Let the message actually dispatch to the server (this is what starts the
-# window) and the model begin replying. We do not need the full reply.
-sleep 10
+# Wait for the reply to actually complete BEFORE exiting. We never send Ctrl-C:
+# interrupting cancels the turn before any tokens are produced (the old bug:
+# empty reply, no usage, unreliable window start).
+#
+# Detection: while generating, the TUI footer shows an interrupt hint
+# ("esc to interrupt"); when the reply is done it returns to the idle hint
+# ("? for shortcuts"). We watch for generation to start, then for it to finish.
+# If either pattern does not match (TUI wording changes between versions), we
+# fall through to a generous fixed wait so a slow/throttled reply still finishes.
+set timeout 20
+expect {
+  -re {(?i)esc to interrupt|interrupt} { }
+  timeout { }
+}
+set timeout 60
+expect {
+  -re {(?i)\? for shortcuts|for shortcuts} { }
+  timeout { }
+}
 
-# Exit cleanly and quickly: Ctrl-C interrupts any in-progress reply and clears
-# the input, then the /exit slash command quits the TUI.
-send "\x03"
+# Small grace period so the final characters of the reply are flushed.
+sleep 3
+
+# Show usage inside this same session so the captured output (and thus the log)
+# contains the "Current session ... Resets H:MM" panel. /usage is a local
+# command - it does not call the model, so it costs no extra tokens.
+send "/usage\r"
+sleep 4
+send "\x1b"   ;# Esc to close the usage panel
 sleep 1
+
+# Quit cleanly via the slash command (NOT an interrupt).
 send "/exit\r"
 
 # Wait for it to quit; if it lingers, force the pty closed so we never hang.
+set timeout 20
 expect {
   eof { }
   timeout { close }
