@@ -14,9 +14,9 @@
 #   ./aligner.sh on                    Enable the schedule
 #   ./aligner.sh off                   Disable the schedule (remembers settings)
 #   ./aligner.sh status                Show schedule + recent log lines
-#   ./aligner.sh wake on               Wake the Mac before the first ping (sudo)
-#   ./aligner.sh wake off              Remove the scheduled wake (sudo)
-#   ./aligner.sh wake status           Show scheduled power events
+#   ./aligner.sh wake on               Auto-wake the Mac before EACH ping (sudo)
+#   ./aligner.sh wake off              Remove the auto-wake helper (sudo)
+#   ./aligner.sh wake status           Show the helper + upcoming wakes
 #
 # Reminder: this does NOT increase your 5-hour quota. It only controls WHEN a
 # new 5-hour window starts.
@@ -29,9 +29,14 @@ CONFIG_FILE="${SCRIPT_DIR}/aligner.config"
 LOG_FILE="${SCRIPT_DIR}/aligner.log"
 LAUNCHD_LOG="${SCRIPT_DIR}/aligner.launchd.log"
 
-# launchd agent identity.
+# launchd agent identity (the pinger, runs as you).
 LABEL="com.sessionaligner.ping"
 PLIST_FILE="${HOME}/Library/LaunchAgents/${LABEL}.plist"
+
+# launchd DAEMON identity (the wake-scheduler, runs as root so pmset needs no password).
+WAKE_LABEL="com.sessionaligner.wake"
+WAKE_PLIST_FILE="/Library/LaunchDaemons/${WAKE_LABEL}.plist"
+WAKE_SCRIPT="${SCRIPT_DIR}/schedule-wakes.sh"
 
 # Old cron markers (from the previous cron-based version) so we can clean them up.
 MARKER_BEGIN="# >>> session-aligner (managed) >>>"
@@ -180,49 +185,93 @@ remove_schedule() {
   fi
 }
 
-# ---------- pmset wake ----------
+# ---------- pmset wake (auto, before every ping time) ----------
 
-# Earliest ping time minus 2 minutes, as HH:MM:SS (so the Mac is awake in time).
-earliest_wake_time() {
-  load_config
-  local best=-1 mins
-  for t in $TIMES; do
-    mins=$(( 10#${t%%:*} * 60 + 10#${t##*:} ))
-    if [ "$best" -lt 0 ] || [ "$mins" -lt "$best" ]; then best="$mins"; fi
-  done
-  best=$(( best - 2 ))
-  [ "$best" -lt 0 ] && best=0
-  printf '%02d:%02d:00' $(( best / 60 )) $(( best % 60 ))
-}
-
-# pmset repeat day codes: M T W R F S U (Mon..Sun).
-pmset_days() {
-  case "$DAYS" in
-    "1-5") echo "MTWRF" ;;
-    *) echo "MTWRFSU" ;;
-  esac
+# Build the root LaunchDaemon plist that runs the wake-scheduler hourly + on wake.
+build_wake_plist() {
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${WAKE_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${WAKE_SCRIPT}</string>
+    <string>${SCRIPT_DIR}</string>
+  </array>
+  <key>RunAtLoad</key>
+  <true/>
+  <key>StartInterval</key>
+  <integer>3600</integer>
+  <key>StandardOutPath</key>
+  <string>${SCRIPT_DIR}/wake.daemon.log</string>
+  <key>StandardErrorPath</key>
+  <string>${SCRIPT_DIR}/wake.daemon.log</string>
+</dict>
+</plist>
+EOF
 }
 
 cmd_wake() {
   load_config
   case "${1:-status}" in
     on)
-      local when days
-      when="$(earliest_wake_time)"
-      days="$(pmset_days)"
-      echo "Scheduling a daily wake at ${when} (${days}) so the first ping can fire while asleep."
-      echo "You'll be asked for your Mac password (this needs admin rights)."
-      sudo pmset repeat wakeorpoweron "$days" "$when"
-      echo "Done. Check it with: ./aligner.sh wake status"
-      echo "Note: this covers the FIRST ping of the day. Later pings rely on the"
-      echo "Mac being awake/in use (or plugged in and not back asleep)."
+      local tmp
+      tmp="$(mktemp -t sessionaligner-wake)"
+      build_wake_plist > "$tmp"
+      chmod +x "$WAKE_SCRIPT" 2>/dev/null || true
+
+      echo "Setting up the auto-wake helper so your Mac wakes ~2 min before EACH"
+      echo "ping time (${TIMES}). You'll be asked for your Mac password once."
+      echo
+
+      # One sudo block = a single password prompt (sudo caches for the rest).
+      sudo bash -c '
+        set -e
+        plist_dst="$1"; tmp="$2"; script="$3"; proj="$4"
+        # Drop the old single repeating wake from the previous version.
+        pmset repeat cancel 2>/dev/null || true
+        install -m 644 -o root -g wheel "$tmp" "$plist_dst"
+        launchctl bootout system "$plist_dst" 2>/dev/null || true
+        launchctl bootstrap system "$plist_dst" 2>/dev/null \
+          || launchctl load -w "$plist_dst"
+        # Seed wakes right now so tonight is covered without waiting an hour.
+        bash "$script" "$proj"
+      ' _ "$WAKE_PLIST_FILE" "$tmp" "$WAKE_SCRIPT" "$SCRIPT_DIR"
+
+      rm -f "$tmp"
+      echo
+      echo "Done. The helper refreshes wakes hourly (and whenever the Mac wakes)."
+      echo "Check it with: ./aligner.sh wake status"
       ;;
     off)
-      echo "Removing the scheduled wake (asks for your Mac password)."
-      sudo pmset repeat cancel
+      echo "Removing the auto-wake helper (asks for your Mac password)."
+      sudo bash -c '
+        plist_dst="$1"; script="$2"; proj="$3"
+        launchctl bootout system "$plist_dst" 2>/dev/null || true
+        rm -f "$plist_dst"
+        # Clear any wakes we already scheduled, plus the old repeat (if any).
+        bash "$script" "$proj" cancel 2>/dev/null || true
+        pmset repeat cancel 2>/dev/null || true
+      ' _ "$WAKE_PLIST_FILE" "$WAKE_SCRIPT" "$SCRIPT_DIR"
+      echo "Done."
       ;;
     status|*)
-      pmset -g sched
+      if [ -f "$WAKE_PLIST_FILE" ]; then
+        echo "Auto-wake helper: ON (${WAKE_LABEL})"
+      else
+        echo "Auto-wake helper: OFF (run './aligner.sh wake on')"
+      fi
+      echo
+      echo "Upcoming scheduled wakes (pmset):"
+      if pmset -g sched 2>/dev/null | grep -qiE 'wake|poweron'; then
+        pmset -g sched 2>/dev/null | grep -iE 'wake|poweron'
+      else
+        echo "  (none yet - they appear after 'wake on' seeds them)"
+      fi
       ;;
   esac
 }
@@ -260,8 +309,8 @@ cmd_setup() {
   echo
   echo "Scheduled: ping at [${TIMES}] $(human_days "$DAYS")."
   echo
-  echo "To make the morning ping fire even while the Mac sleeps (lid closed +"
-  echo "plugged into power), also run:  ./aligner.sh wake on"
+  echo "To make pings fire even while the Mac sleeps (lid closed + plugged into"
+  echo "power), also run:  ./aligner.sh wake on   (wakes ~2 min before each time)"
   echo "Then check everything with:     ./aligner.sh status"
 }
 
@@ -282,7 +331,10 @@ cmd_times() {
   if is_installed; then
     install_schedule
     echo "Updated. Now pinging at [${TIMES}] $(human_days "$DAYS")."
-    echo "If you use a scheduled wake, refresh it: ./aligner.sh wake on"
+    if [ -f "$WAKE_PLIST_FILE" ]; then
+      echo "Auto-wake will pick up the new times within an hour (or run"
+      echo "'./aligner.sh wake on' to apply them right now)."
+    fi
   else
     echo "Saved times [${TIMES}]. Schedule is currently OFF; run './aligner.sh on' to enable."
   fi
@@ -314,11 +366,16 @@ cmd_status() {
     echo "Schedule: OFF"
   fi
   echo
-  echo "Scheduled wake (pmset):"
-  if pmset -g sched 2>/dev/null | grep -qiE 'poweron'; then
-    pmset -g sched 2>/dev/null | grep -iE 'poweron'
+  if [ -f "$WAKE_PLIST_FILE" ]; then
+    echo "Auto-wake:  ON (wakes ~2 min before each ping time)"
   else
-    echo "  (none set by you - run './aligner.sh wake on')"
+    echo "Auto-wake:  OFF (run './aligner.sh wake on')"
+  fi
+  echo "Scheduled wakes (pmset):"
+  if pmset -g sched 2>/dev/null | grep -qiE 'wake|poweron'; then
+    pmset -g sched 2>/dev/null | grep -iE 'wake|poweron'
+  else
+    echo "  (none yet)"
   fi
   echo
   if [ -f "$LOG_FILE" ]; then

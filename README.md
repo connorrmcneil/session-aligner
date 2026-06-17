@@ -86,15 +86,17 @@ accept the default of **05:00 10:00 15:00 every day**.
 ./aligner.sh status
 ```
 
-6. (Optional but recommended for the morning ping) Let the Mac wake itself so the
-   first ping fires even while you're asleep:
+6. (Optional but recommended) Let the Mac wake itself so pings fire even while
+   you're asleep:
 
 ```bash
 ./aligner.sh wake on
 ```
 
-This asks for your Mac password once and schedules a daily wake ~2 minutes before
-your earliest ping time. See "Will it run while the Mac is asleep?" below.
+This asks for your Mac password once, installs a tiny background helper, and makes
+the Mac wake ~2 minutes before **every** ping time. The helper keeps the upcoming
+wakes scheduled automatically — you don't have to run it again. See "Will it run
+while the Mac is asleep?" below.
 
 ---
 
@@ -107,8 +109,9 @@ your earliest ping time. See "Will it run while the Mac is asleep?" below.
 | Turn the schedule OFF | `./aligner.sh off` |
 | Turn the schedule back ON | `./aligner.sh on` |
 | See schedule + recent activity | `./aligner.sh status` |
-| Wake the Mac before the first ping | `./aligner.sh wake on` |
-| Stop waking the Mac | `./aligner.sh wake off` |
+| Auto-wake the Mac before each ping | `./aligner.sh wake on` |
+| Stop the auto-wake helper | `./aligner.sh wake off` |
+| See the helper + upcoming wakes | `./aligner.sh wake status` |
 
 Always run these from inside the folder
 `/Users/connormcneil/Projects/session-maxxing` (do the `cd` line from setup
@@ -160,8 +163,14 @@ match your real day.
 
 ## Will it run while the Mac is asleep?
 
-A sleeping Mac can't ping on its own, so `./aligner.sh wake on` schedules a daily
-wake just before your first ping. Whether that wake happens depends on power:
+A sleeping Mac can't ping on its own, so `./aligner.sh wake on` installs a small
+background helper that schedules a wake ~2 minutes before **every** ping time
+(e.g. 04:58, 09:58, 14:58 for the default 05:00/10:00/15:00). macOS only allows one
+*repeating* wake per day, so the helper keeps a few days of one-time wakes lined up
+and refreshes them every hour (and whenever the Mac wakes). You set it up once and
+forget it.
+
+Whether a scheduled wake actually fires depends on power:
 
 | State | Does the ping fire? |
 | --- | --- |
@@ -170,13 +179,41 @@ wake just before your first ping. Whether that wake happens depends on power:
 | Lid closed, **on battery** | No — macOS blocks scheduled wakes to save battery |
 | Fully shut down | No |
 
-So: **leave the Mac plugged in** and the morning ping will fire even with the lid
-closed. The scheduled wake covers your **first** ping of the day; later pings
-(10:00, 15:00) rely on the Mac being awake or in use by then. If your Mac is
-closed and unplugged, the only fully reliable option is to run this on an
-always-on machine logged into the same Claude account.
+So: **leave the Mac plugged in** and every ping will fire even with the lid closed.
+If your Mac is closed and unplugged, the only fully reliable option is to run this
+on an always-on machine logged into the same Claude account.
 
-Check the wake is set with `./aligner.sh wake status` (or `pmset -g sched`).
+Check the helper and the upcoming wakes with `./aligner.sh wake status` (it lists
+each scheduled wake). The helper logs each refresh to `wake.log` and
+`wake.daemon.log` in the project folder.
+
+### Why the wakes never run out (how it actually works)
+
+When you run `./aligner.sh wake status` you'll only see the next **few days** of
+wakes, not the whole future. That's intentional, and the schedule still continues
+forever. Here's why:
+
+- macOS only allows **one** *repeating* wake per day (via `pmset repeat`). That's
+  not enough for 3 ping times, so instead we use **one-time** wake events and keep
+  topping them up.
+- `./aligner.sh wake on` installs a tiny background helper (a root LaunchDaemon
+  called `com.sessionaligner.wake`) that re-runs `schedule-wakes.sh` **every hour**,
+  **at startup**, and **whenever the Mac wakes**.
+- Each time it runs, it makes sure the next ~3 days of wakes (2 minutes before each
+  ping time) are scheduled, adding only the ones that are missing.
+- One-time wakes disappear automatically after they fire, so the list stays short
+  and is constantly pushed forward — today's run schedules out to day 3, tomorrow's
+  run adds day 4, and so on, with no end.
+
+So the 3-day window you see is just a rolling safety buffer. Even if the Mac sleeps
+for a couple of days, the soonest scheduled wake fires, the Mac wakes, the helper
+runs again, and it refills the buffer. As long as the helper is installed (and the
+Mac is plugged in for the wakes to fire), you never reach the end of the list.
+
+You may notice the same time listed **twice** in `wake status`. That's harmless —
+two wake events at the identical moment just wake the Mac once, and they expire on
+their own after firing. It does not cause double-pings (pinging is driven by a
+separate agent, `com.sessionaligner.ping`).
 
 ## Troubleshooting
 
@@ -185,8 +222,8 @@ Check the wake is set with `./aligner.sh wake status` (or `pmset -g sched`).
 - **"not logged in":** In Terminal run `claude`, then `/login`.
 - **Pings don't fire on schedule (but `test` works):**
   - Make sure the agent is loaded: `./aligner.sh status` should say `Schedule: ON`.
-  - If the time passed while the Mac was asleep/unplugged, see the table above and
-    run `./aligner.sh wake on`, then keep the Mac plugged in.
+  - If the time passed while the Mac was asleep/unplugged, see the table above,
+    make sure `./aligner.sh wake on` is set up, and keep the Mac plugged in.
   - macOS may need permission: **System Settings > Privacy & Security > Full Disk
     Access** and add **Terminal**.
 - **`test` says SUCCESS but `/usage` shows no session started:** the interactive
