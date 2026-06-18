@@ -199,7 +199,8 @@ remove_schedule() {
 
 # ---------- pmset wake (auto, before every ping time) ----------
 
-# Build the root LaunchDaemon plist that runs the wake-scheduler hourly + on wake.
+# Build the root LaunchDaemon plist that runs the wake-scheduler at load and hourly
+# (a missed StartInterval also catches up soon after the Mac wakes).
 build_wake_plist() {
   cat <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
@@ -263,7 +264,8 @@ cmd_wake() {
 
       rm -f "$tmp"
       echo
-      echo "Done. The helper refreshes wakes hourly (and whenever the Mac wakes)."
+      echo "Done. The helper refreshes wakes at load/startup and hourly (and usually"
+      echo "soon after the Mac wakes, when a missed hourly run catches up)."
       echo "Check it with: ${CMD_NAME} wake status"
       ;;
     off)
@@ -690,6 +692,9 @@ cmd_doctor() {
 cmd_repair() {
   load_config
   echo "Repairing Session Aligner..."
+  echo "Note: repair reloads and ENABLES the ping schedule (turns it ON if it was"
+  echo "stopped). Run '${CMD_NAME} stop' afterwards if you wanted it off."
+  echo
   chmod +x "${SCRIPT_DIR}/aligner.sh" "${SCRIPT_DIR}/ping.sh" "${SCRIPT_DIR}/ping.exp" \
            "${SCRIPT_DIR}/schedule-wakes.sh" 2>/dev/null || true
   echo "  Scripts made executable"
@@ -698,7 +703,7 @@ cmd_repair() {
     echo "  No config found - using defaults (${DEFAULT_TIMES}); run '${CMD_NAME} setup' to customize"
   fi
   install_schedule
-  echo "  Ping schedule reloaded"
+  echo "  Ping schedule reloaded and enabled"
 
   if wake_installed; then
     echo

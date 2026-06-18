@@ -44,6 +44,36 @@ log() {
   printf '%s  %s\n' "$(date '+%Y-%m-%d %H:%M:%S %z')" "$1" >> "$LOG_FILE" 2>/dev/null || true
 }
 
+# ---------- single-instance lock ----------
+# RunAtLoad, the hourly StartInterval catch-up, and the manual seed from
+# `wake on` can fire within the same second. Without serialization two runs race
+# in already_scheduled() — both see a time as "missing" and both schedule it,
+# producing the duplicate wakeorpoweron events you'd see in `pmset -g sched`. An
+# atomic mkdir lock makes the later run wait, then find the time already there
+# and add nothing. The lock is skipped in DRY_RUN so tests never block.
+if [ "${DRY_RUN:-0}" != "1" ]; then
+  LOCK_DIR="${PROJECT_DIR}/.wake-schedule.lock"
+  _now=$(date +%s)
+  # Clear a stale lock left by a run that was killed mid-flight, so we never deadlock.
+  if [ -d "$LOCK_DIR" ]; then
+    _lock_mtime=$(stat -f %m "$LOCK_DIR" 2>/dev/null || echo "$_now")
+    if [ $((_now - _lock_mtime)) -gt 120 ]; then
+      rmdir "$LOCK_DIR" 2>/dev/null || true
+      log "cleared a stale wake-schedule lock"
+    fi
+  fi
+  _have_lock=0
+  for _try in $(seq 1 12); do
+    if mkdir "$LOCK_DIR" 2>/dev/null; then _have_lock=1; break; fi
+    sleep 1
+  done
+  if [ "$_have_lock" != "1" ]; then
+    log "another scheduler run is active; skipping this run"
+    exit 0
+  fi
+  trap 'rmdir "$LOCK_DIR" 2>/dev/null || true' EXIT
+fi
+
 # Is a wake already scheduled at this exact "MM/DD/YYYY HH:MM:SS" datetime?
 already_scheduled() {
   pmset -g sched 2>/dev/null | grep -qF "$1"

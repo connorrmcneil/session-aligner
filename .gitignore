@@ -1,5 +1,8 @@
 # Runtime logs
 *.log
 
+# Wake-scheduler single-instance lock (transient; cleaned on exit)
+.wake-schedule.lock/
+
 # macOS
 .DS_Store
