@@ -54,7 +54,7 @@ repo to a new machine.
 **Example:**
 
 ```bash
-cd /path/to/session-maxxing
+cd /path/to/session-aligner
 ./install.sh
 ```
 

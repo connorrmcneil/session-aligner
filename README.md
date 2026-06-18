@@ -100,7 +100,7 @@ A few things that are surprising at first but important to understand:
 2. Go to this folder and run the installer:
 
 ```bash
-cd /Users/connormcneil/Projects/session-maxxing
+cd /Users/connormcneil/Projects/session-aligner
 ./install.sh
 ```
 
@@ -151,6 +151,12 @@ schedule system wake events** through `pmset`. Your password is handled by macOS
 Claude account. The normal ping schedule runs as you and needs no admin access.
 See "Will it run while the Mac is asleep?" below.
 
+> **Note:** auto-wake installs a **root LaunchDaemon** (`com.sessionaligner.wake`)
+> at `/Library/LaunchDaemons/`. For personal/single-user use it runs the scheduler
+> (`schedule-wakes.sh`) straight from **this repo folder** — the daemon points at the
+> script where it lives, so don't move or delete the folder while auto-wake is on
+> (if you do, run `session-aligner wake off`, relocate, then `wake on` again).
+
 ---
 
 ## Everyday commands
@@ -173,7 +179,7 @@ See "Will it run while the Mac is asleep?" below.
 
 If you didn't run `./install.sh`, use `./aligner.sh` instead of `session-aligner`
 (for example `./aligner.sh status`), run from inside the folder
-`/Users/connormcneil/Projects/session-maxxing`. `start`/`stop` are the same as the
+`/Users/connormcneil/Projects/session-aligner`. `start`/`stop` are the same as the
 older `on`/`off`, which still work too.
 
 ## Example schedules
@@ -242,8 +248,8 @@ A sleeping Mac can't ping on its own, so `session-aligner wake on` installs a sm
 background helper that schedules a wake ~2 minutes before **every** window start
 (e.g. 04:58, 09:58, 14:58 for the default 05:00/10:00/15:00). macOS only allows one
 *repeating* wake per day, so the helper keeps a few days of one-time wakes lined up
-and refreshes them every hour (and whenever the Mac wakes). You set it up once and
-forget it.
+and refreshes them at load/startup and hourly (and usually soon after the Mac wakes,
+when a missed hourly run catches up). You set it up once and forget it.
 
 This is also the only part of the tool that needs your Mac password: scheduling
 system wake events requires admin/root access through `pmset`. The password is
@@ -277,8 +283,9 @@ forever. Here's why:
   not enough for 3 window starts, so instead we use **one-time** wake events and
   keep topping them up.
 - `session-aligner wake on` installs a tiny background helper (a root LaunchDaemon
-  called `com.sessionaligner.wake`) that re-runs `schedule-wakes.sh` **every hour**,
-  **at startup**, and **whenever the Mac wakes**.
+  called `com.sessionaligner.wake`) that re-runs `schedule-wakes.sh` **at load/startup**
+  and **every hour**, and **usually soon after the Mac wakes** (a missed hourly run
+  catches up shortly after wake — it is not an explicit wake trigger).
 - Each time it runs, it makes sure the next ~3 days of wakes (2 minutes before each
   window start) are scheduled, adding only the ones that are missing.
 - One-time wakes disappear automatically after they fire, so the list stays short
