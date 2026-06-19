@@ -30,6 +30,11 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner wake status --raw` | Same, plus raw `pmset` output | No |
 | `session-aligner wake lead <min>` | Set how early the Mac wakes (1-60, default 15) | Yes, if auto-wake is installed |
 | `session-aligner wake keep-awake <min>` | Set the preflight caffeinate duration (5-90, default 20) | No |
+| `session-aligner retry status` | Show retry-after-reset settings | No |
+| `session-aligner retry on` | Recover when the old window is still active at ping time | No |
+| `session-aligner retry off` | Report fresh/old/used honestly but never auto-retry | No |
+| `session-aligner retry grace <min>` | Reset within this means OLD window (1-60, default 20) | No |
+| `session-aligner retry after-reset <sec>` | Wait this long past the reset before re-pinging (0-600, default 60) | No |
 | `session-aligner doctor` | Diagnose common setup problems | No |
 | `session-aligner check` | Same as `doctor` | No |
 | `session-aligner repair` | Fix common problems (reload agents, chmod) | Yes, if auto-wake is installed |
@@ -307,6 +312,65 @@ expire before the ping fires).
 ```bash
 session-aligner wake keep-awake 20
 session-aligner wake keep-awake 25
+```
+
+---
+
+## Retry after an active old window
+
+A ping only starts a *fresh* 5-hour window if no window is currently active. If an
+earlier ping ran a little late, its window can still be running when the next ping
+fires — so that ping just rides the old window instead of opening a new one. To tell
+the difference, after each ping the tool reads the `/usage` reset time and classifies
+the result:
+
+| Outcome | Meaning | Reset time seen |
+|---------|---------|-----------------|
+| `FRESH WINDOW STARTED` | A new 5-hour window opened | ~4.5–5 hours away |
+| `OLD WINDOW ACTIVE` | Old window still running, about to reset | within `RETRY_GRACE_MIN` (default 20 min) |
+| `USED EXISTING WINDOW` | Ping landed mid-window; no fresh window, no retry needed | between the grace and ~4.5 h |
+| `PING SENT (UNCONFIRMED)` | Claude replied but the reset time couldn't be parsed | (unreadable) |
+| `FAILURE` | Timeout, not logged in, network/startup error, missing command | (n/a) |
+
+When the result is `OLD WINDOW ACTIVE` **and** retry is enabled, the tool keeps the
+Mac awake with `caffeinate` until `RETRY_AFTER_RESET_SEC` (default 60) past the reset,
+then pings **once** more so the fresh window opens. The retry is one-time: it never
+loops or reschedules, and it logs the second result honestly even if it still isn't
+fresh. The wait is bounded (≈ grace + after-reset + a small buffer), and a reset more
+than ~7 hours away is treated as `UNCONFIRMED` rather than a retry target, so a bad
+parse can never make the script sleep for hours. **Configured ping times never move.**
+
+These show up in `session-aligner status` (the `Last ping:` line reads `FRESH`,
+`OLD-WINDOW`, `USED-EXISTING`, `UNCONFIRMED`, or `FAILURE`) and in
+`session-aligner logs ping` (full detail).
+
+### `session-aligner retry status`
+
+**What it does:** Shows whether retry is on, the grace window, and the
+after-reset wait.
+
+### `session-aligner retry on` / `off`
+
+**What it does:** Enables or disables the one-time recovery retry
+(`RETRY_AFTER_ACTIVE_WINDOW`). With it off, pings are still classified honestly —
+they just won't auto-retry.
+
+### `session-aligner retry grace <min>`
+
+**What it does:** Sets `RETRY_GRACE_MIN` (1–60, default 20). A `/usage` reset within
+this many minutes counts as an OLD window still active (and triggers a retry when
+enabled).
+
+### `session-aligner retry after-reset <sec>`
+
+**What it does:** Sets `RETRY_AFTER_RESET_SEC` (0–600, default 60) — how long past the
+reset to wait before re-pinging, so the old window has definitely closed.
+
+```bash
+session-aligner retry status
+session-aligner retry off
+session-aligner retry grace 20
+session-aligner retry after-reset 60
 ```
 
 ---
