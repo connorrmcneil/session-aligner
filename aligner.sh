@@ -72,6 +72,13 @@ DEFAULT_DAYS="*"   # "*" = every day; "1-5" = weekdays (Mon-Fri)
 DEFAULT_WAKE_LEAD_MIN=15    # range 1-60
 DEFAULT_KEEP_AWAKE_MIN=20   # range 5-90
 
+# Retry-after-reset defaults. After a ping, ping.sh reads the /usage reset time
+# to tell whether a FRESH window started; if the OLD window is still active and
+# about to reset, it waits past the reset and pings once more. Read by ping.sh.
+DEFAULT_RETRY_AFTER_ACTIVE_WINDOW=1   # 0/1 flag
+DEFAULT_RETRY_GRACE_MIN=20            # range 1-60
+DEFAULT_RETRY_AFTER_RESET_SEC=60      # range 0-600
+
 # ---------- config helpers ----------
 
 load_config() {
@@ -79,6 +86,9 @@ load_config() {
   DAYS="$DEFAULT_DAYS"
   WAKE_LEAD_MIN="$DEFAULT_WAKE_LEAD_MIN"
   KEEP_AWAKE_MIN="$DEFAULT_KEEP_AWAKE_MIN"
+  RETRY_AFTER_ACTIVE_WINDOW="$DEFAULT_RETRY_AFTER_ACTIVE_WINDOW"
+  RETRY_GRACE_MIN="$DEFAULT_RETRY_GRACE_MIN"
+  RETRY_AFTER_RESET_SEC="$DEFAULT_RETRY_AFTER_RESET_SEC"
   if [ -f "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
@@ -90,6 +100,13 @@ load_config() {
   case "$KEEP_AWAKE_MIN" in *[!0-9]*|'') KEEP_AWAKE_MIN="$DEFAULT_KEEP_AWAKE_MIN" ;; esac
   [ "$KEEP_AWAKE_MIN" -lt 5 ]  && KEEP_AWAKE_MIN=5
   [ "$KEEP_AWAKE_MIN" -gt 90 ] && KEEP_AWAKE_MIN=90
+  case "$RETRY_AFTER_ACTIVE_WINDOW" in 0|1) ;; *) RETRY_AFTER_ACTIVE_WINDOW="$DEFAULT_RETRY_AFTER_ACTIVE_WINDOW" ;; esac
+  case "$RETRY_GRACE_MIN" in *[!0-9]*|'') RETRY_GRACE_MIN="$DEFAULT_RETRY_GRACE_MIN" ;; esac
+  [ "$RETRY_GRACE_MIN" -lt 1 ]  && RETRY_GRACE_MIN=1
+  [ "$RETRY_GRACE_MIN" -gt 60 ] && RETRY_GRACE_MIN=60
+  case "$RETRY_AFTER_RESET_SEC" in *[!0-9]*|'') RETRY_AFTER_RESET_SEC="$DEFAULT_RETRY_AFTER_RESET_SEC" ;; esac
+  [ "$RETRY_AFTER_RESET_SEC" -lt 0 ]   && RETRY_AFTER_RESET_SEC=0
+  [ "$RETRY_AFTER_RESET_SEC" -gt 600 ] && RETRY_AFTER_RESET_SEC=600
 }
 
 save_config() {
@@ -98,6 +115,9 @@ save_config() {
     echo "DAYS=\"${DAYS}\""
     echo "WAKE_LEAD_MIN=\"${WAKE_LEAD_MIN}\""
     echo "KEEP_AWAKE_MIN=\"${KEEP_AWAKE_MIN}\""
+    echo "RETRY_AFTER_ACTIVE_WINDOW=\"${RETRY_AFTER_ACTIVE_WINDOW}\""
+    echo "RETRY_GRACE_MIN=\"${RETRY_GRACE_MIN}\""
+    echo "RETRY_AFTER_RESET_SEC=\"${RETRY_AFTER_RESET_SEC}\""
   } > "$CONFIG_FILE"
 }
 
@@ -487,6 +507,60 @@ EOF
   esac
 }
 
+# ---------- retry-after-reset settings ----------
+
+cmd_retry() {
+  load_config
+  case "${1:-status}" in
+    on)
+      RETRY_AFTER_ACTIVE_WINDOW=1
+      save_config
+      echo "Retry after an active old window: ON"
+      echo "If a ping lands while the old window is still active and about to reset,"
+      echo "the tool waits until ${RETRY_AFTER_RESET_SEC}s past the reset, then pings once more."
+      ;;
+    off)
+      RETRY_AFTER_ACTIVE_WINDOW=0
+      save_config
+      echo "Retry after an active old window: OFF"
+      echo "Pings still report FRESH/OLD/USED honestly, but won't auto-retry."
+      ;;
+    grace)
+      local n="${2:-}"
+      if ! validate_int "$n" 1 60; then
+        echo "Invalid grace. Use a whole number of minutes, 1-60." >&2
+        echo "Example: ${CMD_NAME} retry grace 20" >&2
+        exit 1
+      fi
+      RETRY_GRACE_MIN="$n"
+      save_config
+      echo "Retry grace set to ${RETRY_GRACE_MIN} min (reset within this => OLD window => retry)."
+      ;;
+    after-reset)
+      local n="${2:-}"
+      if ! validate_int "$n" 0 600; then
+        echo "Invalid after-reset. Use a whole number of seconds, 0-600." >&2
+        echo "Example: ${CMD_NAME} retry after-reset 60" >&2
+        exit 1
+      fi
+      RETRY_AFTER_RESET_SEC="$n"
+      save_config
+      echo "Retry after-reset set to ${RETRY_AFTER_RESET_SEC}s (wait past the reset before re-pinging)."
+      ;;
+    status|*)
+      local on_off="OFF"
+      [ "$RETRY_AFTER_ACTIVE_WINDOW" = "1" ] && on_off="ON"
+      printf '%-22s %s\n' "Retry after old window:" "$on_off"
+      printf '%-22s %s\n' "Grace (OLD window):" "${RETRY_GRACE_MIN} minutes"
+      printf '%-22s %s\n' "Wait after reset:" "${RETRY_AFTER_RESET_SEC} seconds"
+      echo
+      echo "A ping is FRESH only when /usage shows the window resetting ~5h out."
+      echo "If it resets within the grace window, that's an OLD window still active;"
+      echo "with retry ON the tool waits past the reset and pings once more."
+      ;;
+  esac
+}
+
 # ---------- shared display helpers ----------
 
 # Find the claude binary the same way ping.sh does (PATH may be minimal).
@@ -550,19 +624,25 @@ upcoming_wake_epochs() {
   done | sort -n | uniq
 }
 
-# Most recent line from a log that contains SUCCESS/FAILURE, summarized.
+# Most recent meaningful result line from a log, summarized. Recognizes the ping
+# outcome vocabulary (FRESH/OLD/USED/UNCONFIRMED) as well as the SUCCESS/FAILURE
+# words still used by the wake log (so "Last refresh:" keeps working).
 last_log_summary() {
   local file="$1"
   [ -f "$file" ] || return 1
   local line
-  line=$(grep -iE 'SUCCESS|FAILURE' "$file" 2>/dev/null | tail -n 1)
+  line=$(grep -iE 'FRESH WINDOW STARTED|OLD WINDOW ACTIVE|USED EXISTING WINDOW|UNCONFIRMED|SUCCESS|FAILURE' "$file" 2>/dev/null | tail -n 1)
   [ -z "$line" ] && line=$(tail -n 1 "$file" 2>/dev/null)
   [ -z "$line" ] && return 1
-  # "2026-06-17 10:00:01 -0300  SUCCESS: ..." -> "SUCCESS  2026-06-17 10:00"
+  # "2026-06-17 10:00:01 -0300  FRESH WINDOW STARTED: ..." -> "FRESH  2026-06-17 10:00"
   local stamp word
   stamp=$(printf '%s' "$line" | grep -oE '^[0-9]{4}-[0-9]{2}-[0-9]{2} [0-9]{2}:[0-9]{2}')
-  if printf '%s' "$line" | grep -qi 'SUCCESS'; then word="SUCCESS"
-  elif printf '%s' "$line" | grep -qi 'FAILURE'; then word="FAILURE"
+  if   printf '%s' "$line" | grep -qi 'FRESH WINDOW STARTED'; then word="FRESH"
+  elif printf '%s' "$line" | grep -qi 'OLD WINDOW ACTIVE';    then word="OLD-WINDOW"
+  elif printf '%s' "$line" | grep -qi 'USED EXISTING WINDOW'; then word="USED-EXISTING"
+  elif printf '%s' "$line" | grep -qi 'UNCONFIRMED';          then word="UNCONFIRMED"
+  elif printf '%s' "$line" | grep -qi 'SUCCESS';              then word="SUCCESS"
+  elif printf '%s' "$line" | grep -qi 'FAILURE';              then word="FAILURE"
   else word=""; fi
   printf '%s%s%s' "$word" "${word:+ }" "$stamp"
 }
@@ -979,6 +1059,10 @@ Usage:
   ${CMD_NAME} wake on | off | status
   ${CMD_NAME} wake lead <min>        (how early to wake, 1-60; default 15)
   ${CMD_NAME} wake keep-awake <min>  (caffeinate duration, 5-90; default 20)
+  ${CMD_NAME} retry status
+  ${CMD_NAME} retry on | off              (recover when old window still active)
+  ${CMD_NAME} retry grace <min>           (reset within this => OLD, 1-60; default 20)
+  ${CMD_NAME} retry after-reset <sec>     (wait past reset before re-ping, 0-600; default 60)
   ${CMD_NAME} next
   ${CMD_NAME} doctor
   ${CMD_NAME} repair
@@ -1006,6 +1090,7 @@ case "${1:-}" in
   off|stop)     cmd_off ;;
   status)       shift; cmd_status "${1:-}" ;;
   wake)         shift; cmd_wake "$@" ;;
+  retry)        shift; cmd_retry "$@" ;;
   next)         cmd_next ;;
   doctor|check) cmd_doctor ;;
   repair)       cmd_repair ;;

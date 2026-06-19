@@ -21,6 +21,26 @@ set -u
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/aligner.log"
 EXP_SCRIPT="${SCRIPT_DIR}/ping.exp"
+CONFIG_FILE="${SCRIPT_DIR}/aligner.config"
+
+# Retry-after-reset behaviour (config-driven). After a ping, we read the /usage
+# reset time to tell whether a FRESH 5-hour window actually started. If the OLD
+# window is still active and about to reset, we wait until just after the reset
+# and ping ONCE more so the fresh window opens. Configured ping times never move.
+RETRY_AFTER_ACTIVE_WINDOW=1   # 1=do the one-time recovery retry; 0=just report
+RETRY_GRACE_MIN=20            # reset within this many min => OLD window (retry)
+RETRY_AFTER_RESET_SEC=60      # wait this long past the reset before re-pinging
+FRESH_MIN_MIN=270             # internal: reset >= this many min away => FRESH (~4.5h)
+# shellcheck disable=SC1090
+[ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
+# Clamp to sane ranges in case aligner.config was hand-edited (mirrors aligner.sh).
+case "$RETRY_AFTER_ACTIVE_WINDOW" in 0|1) ;; *) RETRY_AFTER_ACTIVE_WINDOW=1 ;; esac
+case "$RETRY_GRACE_MIN" in *[!0-9]*|'') RETRY_GRACE_MIN=20 ;; esac
+[ "$RETRY_GRACE_MIN" -lt 1 ]  && RETRY_GRACE_MIN=1
+[ "$RETRY_GRACE_MIN" -gt 60 ] && RETRY_GRACE_MIN=60
+case "$RETRY_AFTER_RESET_SEC" in *[!0-9]*|'') RETRY_AFTER_RESET_SEC=60 ;; esac
+[ "$RETRY_AFTER_RESET_SEC" -lt 0 ]   && RETRY_AFTER_RESET_SEC=0
+[ "$RETRY_AFTER_RESET_SEC" -gt 600 ] && RETRY_AFTER_RESET_SEC=600
 
 # launchd/cron run with a tiny PATH that usually does NOT include where
 # npm/homebrew put the `claude` binary. Add the common locations.
@@ -75,35 +95,72 @@ elif command -v gtimeout >/dev/null 2>&1; then
   TIMEOUT_BIN="gtimeout 180"
 fi
 
-log "INFO: sending interactive ping via ${CLAUDE_BIN} (model: ${MODEL})"
+# Parse the /usage "Resets H[:MM]am/pm" clock time out of $1 into an epoch.
+# Echoes an epoch on success, NOTHING on any failure (callers treat empty as
+# "couldn't confirm"). Handles "Resets3:10pm", missing minutes, the trailing
+# "(TZ)", am/pm casing, after-midnight reset (parsed time < now => +1 day), and
+# rejects anything more than ~7h out as suspicious so we never wait for hours.
+parse_reset_epoch() {
+  local clean="$1" raw clock ampm hm epoch now
+  raw="$(printf '%s' "$clean" | grep -ioE 'resets[[:space:]]*[0-9]{1,2}(:[0-9]{2})?[[:space:]]*[ap]m' | head -1)"
+  [ -z "$raw" ] && return 0
+  clock="$(printf '%s' "$raw" | sed -E 's/^[Rr]esets[[:space:]]*//; s/[[:space:]]//g')"
+  ampm="$(printf '%s' "$clock" | grep -ioE '[ap]m' | tr '[:lower:]' '[:upper:]')"
+  hm="$(printf '%s' "$clock" | sed -E 's/[aApPmM]+$//')"
+  case "$hm" in *:*) : ;; *) hm="${hm}:00" ;; esac
+  now="$(date +%s)"
+  epoch="$(date -j -f "%Y-%m-%d %I:%M%p" "$(date '+%Y-%m-%d') ${hm}${ampm}" +%s 2>/dev/null)"
+  [ -z "$epoch" ] && return 0
+  [ "$epoch" -lt "$now" ] && epoch=$((epoch + 86400))
+  [ "$epoch" -gt $((now + 7 * 3600)) ] && return 0
+  printf '%s' "$epoch"
+}
 
-# Drive the interactive TUI. Run inside the project folder so the per-folder
-# trust prompt (if any) is answered once and remembered for next time.
-OUTPUT="$(cd "$SCRIPT_DIR" && $TIMEOUT_BIN expect "$EXP_SCRIPT" "$CLAUDE_BIN" 2>&1)"
-STATUS=$?
+# Run ONE ping and classify it. Sets globals so it can be called twice (initial
+# ping + at most one retry) without duplicating logic:
+#   PING_OUTCOME  FRESH | OLD | USED | UNCONFIRMED | FAIL_TIMEOUT | FAIL_LOGIN
+#                 | FAIL_NET | FAIL_START
+#   EXIT_CODE     suggested process exit code for this attempt
+#   RESET_EPOCH RESET_HHMM MINS_LEFT  (reset info when parsed)
+#   SESSION_LINE PCT SNIPPET TOKENS_LINE  (proof/details for logging)
+# Honours test hooks: FAKE_CLEAN (skip the real spawn, use it as the output) and
+# FORCE_RESET_EPOCH (bypass the parser with a fixed epoch).
+run_one_ping() {
+  PING_OUTCOME=""; EXIT_CODE=0
+  RESET_EPOCH=""; RESET_HHMM=""; MINS_LEFT=""
+  SESSION_LINE=""; PCT=""; SNIPPET=""; TOKENS_LINE=""
+  local OUTPUT CLEAN STATUS
 
-# Strip ANSI escape codes and control chars so the logged snippet is readable.
-# (perl handles \e/\a and hex classes consistently across macOS/Linux; BSD sed
-# does not.)
-if command -v perl >/dev/null 2>&1; then
-  CLEAN="$(printf '%s' "$OUTPUT" | LC_ALL=C perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g; s/\e\][^\a]*\a//g; s/[\x00-\x08\x0b\x0c\x0e-\x1f]//g')"
-else
-  CLEAN="$(printf '%s' "$OUTPUT" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
-fi
-SNIPPET="$(printf '%s' "$CLEAN" | tr '\n' ' ' | tr -s ' ' | cut -c1-160)"
+  if [ -n "${FAKE_CLEAN:-}" ]; then
+    CLEAN="$FAKE_CLEAN"; STATUS=0
+  else
+    # Drive the interactive TUI. Run inside the project folder so the per-folder
+    # trust prompt (if any) is answered once and remembered for next time.
+    OUTPUT="$(cd "$SCRIPT_DIR" && $TIMEOUT_BIN expect "$EXP_SCRIPT" "$CLAUDE_BIN" 2>&1)"
+    STATUS=$?
+    # Strip ANSI escape codes and control chars so the logged snippet is readable.
+    # (perl handles \e/\a and hex classes consistently across macOS/Linux; BSD sed
+    # does not.)
+    if command -v perl >/dev/null 2>&1; then
+      CLEAN="$(printf '%s' "$OUTPUT" | LC_ALL=C perl -pe 's/\e\[[0-9;?]*[A-Za-z]//g; s/\e\][^\a]*\a//g; s/[\x00-\x08\x0b\x0c\x0e-\x1f]//g')"
+    else
+      CLEAN="$(printf '%s' "$OUTPUT" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
+    fi
+  fi
+  SNIPPET="$(printf '%s' "$CLEAN" | tr '\n' ' ' | tr -s ' ' | cut -c1-160)"
 
-# --- Proof extraction (best-effort) ---------------------------------------
-# 1) Session/reset line from the captured /usage panel. The TUI strips spaces
-#    when it renders, so match loosely on "Resets ..." and "NN% used".
-SESSION_LINE="$(printf '%s' "$CLEAN" | grep -ioE 'resets[^|]{0,40}' | head -1 | tr -s ' ')"
-PCT="$(printf '%s' "$CLEAN" | grep -ioE '[0-9]+% ?used' | head -1)"
+  # --- Proof extraction (best-effort) -------------------------------------
+  # Session/reset line from the captured /usage panel. The TUI strips spaces
+  # when it renders, so match loosely on "Resets ..." and "NN% used".
+  SESSION_LINE="$(printf '%s' "$CLEAN" | grep -ioE 'resets[^|]{0,40}' | head -1 | tr -s ' ')"
+  PCT="$(printf '%s' "$CLEAN" | grep -ioE '[0-9]+% ?used' | head -1)"
 
-# 2) Exact token usage from the transcript this ping just created. The numbers
-#    are NOT in /usage; they live in the session JSONL as a `usage` field.
-PROJ="${HOME}/.claude/projects/$(printf '%s' "$SCRIPT_DIR" | sed 's#/#-#g')"
-TOKENS_LINE=""
-if command -v python3 >/dev/null 2>&1; then
-  TOKENS_LINE="$(python3 - "$PROJ" <<'PY' 2>/dev/null
+  # Exact token usage from the transcript this ping just created. The numbers
+  # are NOT in /usage; they live in the session JSONL as a `usage` field.
+  local PROJ
+  PROJ="${HOME}/.claude/projects/$(printf '%s' "$SCRIPT_DIR" | sed 's#/#-#g')"
+  if [ -z "${FAKE_CLEAN:-}" ] && command -v python3 >/dev/null 2>&1; then
+    TOKENS_LINE="$(python3 - "$PROJ" <<'PY' 2>/dev/null
 import sys, os, glob, json
 proj = sys.argv[1]
 files = sorted(glob.glob(os.path.join(proj, '*.jsonl')), key=os.path.getmtime) if os.path.isdir(proj) else []
@@ -146,29 +203,101 @@ print('input=%d output=%d cache_read=%d cache_write=%d | reply: "%s"' % (
     g('cache_read_input_tokens'), g('cache_creation_input_tokens'), reply))
 PY
 )"
+  fi
+
+  # --- Failure detection (unchanged rules) --------------------------------
+  if [ "$STATUS" -eq 124 ]; then
+    PING_OUTCOME="FAIL_TIMEOUT"; EXIT_CODE=124; return
+  elif printf '%s' "$CLEAN" | grep -qiE 'sign ?in|please log ?in|/login|not authenticated|unauthor|authenticate your'; then
+    PING_OUTCOME="FAIL_LOGIN"; EXIT_CODE=1; return
+  elif printf '%s' "$CLEAN" | grep -qiE 'network error|offline|could not connect|getaddrinfo|enotfound|dns'; then
+    PING_OUTCOME="FAIL_NET"; EXIT_CODE=1; return
+  elif printf '%s' "$CLEAN" | grep -qiE 'claude exited before prompt|ERROR: missing path'; then
+    PING_OUTCOME="FAIL_START"; EXIT_CODE=1; return
+  fi
+
+  # --- Claude replied: classify the window from the /usage reset time -----
+  if [ -n "${FORCE_RESET_EPOCH:-}" ]; then
+    local now2; now2="$(date +%s)"
+    if [ "$FORCE_RESET_EPOCH" -gt $((now2 + 7 * 3600)) ]; then RESET_EPOCH=""
+    else RESET_EPOCH="$FORCE_RESET_EPOCH"; fi
+  else
+    RESET_EPOCH="$(parse_reset_epoch "$CLEAN")"
+  fi
+
+  if [ -z "$RESET_EPOCH" ]; then
+    PING_OUTCOME="UNCONFIRMED"; EXIT_CODE=0; return
+  fi
+
+  local now; now="$(date +%s)"
+  MINS_LEFT=$(( (RESET_EPOCH - now + 59) / 60 ))
+  [ "$MINS_LEFT" -lt 0 ] && MINS_LEFT=0
+  RESET_HHMM="$(date -j -f %s "$RESET_EPOCH" '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+
+  if   [ "$MINS_LEFT" -le "$RETRY_GRACE_MIN" ]; then PING_OUTCOME="OLD"
+  elif [ "$MINS_LEFT" -ge "$FRESH_MIN_MIN" ];   then PING_OUTCOME="FRESH"
+  else PING_OUTCOME="USED"; fi
+  EXIT_CODE=0
+}
+
+# Log the result of the most recent run_one_ping. $1 (optional) is a prefix tag,
+# e.g. "RETRY ", used to label the second attempt's lines.
+log_outcome() {
+  local tag="${1:-}"
+  [ -n "$SESSION_LINE" ] && log "SESSION: ${SESSION_LINE}${PCT:+ | ${PCT}}"
+  local detail=""
+  [ -n "$TOKENS_LINE" ] && detail=" TOKENS: ${TOKENS_LINE}"
+  case "$PING_OUTCOME" in
+    FRESH)
+      log "${tag}FRESH WINDOW STARTED: resets at ${RESET_HHMM} (in ${MINS_LEFT}m).${detail}" ;;
+    OLD)
+      if [ "$RETRY_AFTER_ACTIVE_WINDOW" = "1" ]; then
+        local retry_hhmm
+        retry_hhmm="$(date -j -f %s $((RESET_EPOCH + RETRY_AFTER_RESET_SEC)) '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); scheduling retry for ${retry_hhmm}"
+      else
+        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); retry disabled (RETRY_AFTER_ACTIVE_WINDOW=0)"
+      fi ;;
+    USED)
+      log "${tag}USED EXISTING WINDOW: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); no retry (mid-window)" ;;
+    UNCONFIRMED)
+      log "${tag}PING SENT (UNCONFIRMED): Claude replied but could not read /usage reset time. Verify with /usage. Snippet: ${SNIPPET:-(none)}" ;;
+    FAIL_TIMEOUT)
+      log "${tag}FAILURE: timed out (network problem, or the TUI did not respond). Output: ${SNIPPET}" ;;
+    FAIL_LOGIN)
+      log "${tag}FAILURE: not logged in. Open a terminal, run 'claude', then '/login'. Output: ${SNIPPET}" ;;
+    FAIL_NET)
+      log "${tag}FAILURE: network error. Check your internet connection. Output: ${SNIPPET}" ;;
+    FAIL_START)
+      log "${tag}FAILURE: could not start the interactive session. Output: ${SNIPPET}" ;;
+  esac
+}
+
+log "INFO: sending interactive ping via ${CLAUDE_BIN} (model: ${MODEL})"
+
+run_one_ping
+log_outcome
+
+# One-time recovery retry: only when the OLD window is still active and about to
+# reset, and only if enabled. Straight-line - never loops, never re-schedules.
+if [ "$PING_OUTCOME" = "OLD" ] && [ "$RETRY_AFTER_ACTIVE_WINDOW" = "1" ]; then
+  target=$(( RESET_EPOCH + RETRY_AFTER_RESET_SEC ))
+  now="$(date +%s)"
+  wait_secs=$(( target - now ))
+  [ "$wait_secs" -lt 0 ] && wait_secs=0
+  # Bound the wait so a bad parse can never sleep for hours.
+  cap=$(( RETRY_GRACE_MIN * 60 + RETRY_AFTER_RESET_SEC + 120 ))
+  [ "$wait_secs" -gt "$cap" ] && wait_secs="$cap"
+
+  log "RETRYING AFTER RESET: holding awake ${wait_secs}s, then re-pinging (window should reset at ${RESET_HHMM})"
+  if [ "${DRY_RUN:-0}" = "1" ]; then
+    echo "DRY: caffeinate -dimsu -t ${wait_secs}; then one re-ping"
+  else
+    # Keep the Mac fully awake through the wait (mirrors preflight-awake.sh).
+    caffeinate -dimsu -t "$wait_secs" 2>/dev/null || sleep "$wait_secs"
+    run_one_ping            # the SINGLE retry; its result is logged honestly
+    log_outcome "RETRY: "   # and we stop, even if it is still not FRESH
+  fi
 fi
 
-# Decide outcome. Interactive exit (Ctrl-C) is normal, so a non-login/non-network
-# run that completed is treated as success.
-if [ "$STATUS" -eq 124 ]; then
-  log "FAILURE: timed out (network problem, or the TUI did not respond). Output: ${SNIPPET}"
-  exit 124
-elif printf '%s' "$CLEAN" | grep -qiE 'sign ?in|please log ?in|/login|not authenticated|unauthor|authenticate your'; then
-  log "FAILURE: not logged in. Open a terminal, run 'claude', then '/login'. Output: ${SNIPPET}"
-  exit 1
-elif printf '%s' "$CLEAN" | grep -qiE 'network error|offline|could not connect|getaddrinfo|enotfound|dns'; then
-  log "FAILURE: network error. Check your internet connection. Output: ${SNIPPET}"
-  exit 1
-elif printf '%s' "$CLEAN" | grep -qiE 'claude exited before prompt|ERROR: missing path'; then
-  log "FAILURE: could not start the interactive session. Output: ${SNIPPET}"
-  exit 1
-else
-  [ -n "$SESSION_LINE" ] && log "SESSION: ${SESSION_LINE}${PCT:+ | ${PCT}}"
-  if [ -n "$TOKENS_LINE" ]; then
-    log "SUCCESS: interactive ping sent (5-hour window should now be open). TOKENS: ${TOKENS_LINE}"
-  else
-    log "SUCCESS: interactive ping sent (5-hour window should now be open). Snippet: ${SNIPPET:-(none)}"
-    log "INFO: could not read token usage from transcript; verify with /usage in Claude Code."
-  fi
-  exit 0
-fi
+exit "${EXIT_CODE:-0}"

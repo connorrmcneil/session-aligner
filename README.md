@@ -134,9 +134,12 @@ session-aligner status
 session-aligner test
 ```
 
-You should see a short reply from Claude and a `SUCCESS` line. If you see a
-`FAILURE` line, it tells you what's wrong (for example "not logged in"). You can
-also run `session-aligner doctor` any time to diagnose problems.
+You should see a short reply from Claude and a `FRESH WINDOW STARTED` line (if no
+window was active). Other honest outcomes are `USED EXISTING WINDOW` (a window was
+already running) and `OLD WINDOW ACTIVE` (the old window is about to reset — the tool
+then waits and retries once). A `FAILURE` line tells you what's wrong (for example
+"not logged in"). You can also run `session-aligner doctor` any time to diagnose
+problems. See [Retry after an active old window](docs/commands.md#retry-after-an-active-old-window).
 
 ### About auto-wake and your Mac password
 
@@ -250,13 +253,16 @@ Easiest proof - the log. Every ping now writes its real token usage to
    lines like:
 
 ```text
-... SESSION: Resets 12:30pm | 18% used
-... SUCCESS: interactive ping sent (5-hour window should now be open). TOKENS: input=10 output=168 cache_read=11856 | reply: "Hey! I'm ready to help..."
+... SESSION: Resets 8:11pm | 0% used
+... FRESH WINDOW STARTED: resets at 8:11pm (in 300m). TOKENS: input=10 output=168 cache_read=11856 | reply: "Hey! I'm ready to help..."
 ```
 
    An `output=` number greater than 0 means Claude actually answered - real tokens
-   were spent through your subscription. That is your everyday "it's working"
-   signal.
+   were spent through your subscription. The `FRESH WINDOW STARTED` line (reset ~5h
+   out) is the proof a *new* window opened. If you instead see `USED EXISTING WINDOW`
+   or `OLD WINDOW ACTIVE`, a window was already running — that's reported honestly
+   rather than as a fresh-window success. See
+   [Retry after an active old window](docs/commands.md#retry-after-an-active-old-window).
 
 Authoritative check - the reset time. To confirm a ping actually *started* a new
 window (only happens when no window is currently active):
@@ -354,12 +360,19 @@ separate agent, `com.sessionaligner.ping`).
     make sure `session-aligner wake on` is set up, and keep the Mac plugged in.
   - macOS may need permission: **System Settings > Privacy & Security > Full Disk
     Access** and add **Terminal**.
-- **`test` says SUCCESS but `/usage` shows no session started:** the interactive
-  automation didn't register. Check: are you logged into Claude Code with your
-  Pro/Max account (`claude` then `/login`)? Is `expect` installed (`which expect`
-  - on macOS it's `/usr/bin/expect`)? The ping uses **interactive** Claude Code
-  driven through a pseudo-terminal (`expect`); headless `claude -p` pings will never
-  start the subscription window by design.
+- **A ping replied but didn't start a fresh window:** the tool now reports this
+  honestly instead of calling it `SUCCESS`. `USED EXISTING WINDOW` / `OLD WINDOW
+  ACTIVE` mean a window was already running. For an `OLD WINDOW ACTIVE` (about to
+  reset) the tool waits past the reset and retries once automatically; tune this with
+  `session-aligner retry grace`/`after-reset`, or turn it off with
+  `session-aligner retry off`.
+- **A ping logs `PING SENT (UNCONFIRMED)`:** Claude replied, but the `/usage` reset
+  time couldn't be read, so the tool can't confirm whether the window is fresh. Open
+  Claude Code and check `/usage` manually. Are you logged into your Pro/Max account
+  (`claude` then `/login`)? Is `expect` installed (`which expect` — on macOS it's
+  `/usr/bin/expect`)? The ping uses **interactive** Claude Code driven through a
+  pseudo-terminal (`expect`); headless `claude -p` pings will never start the
+  subscription window by design.
 - **"expect not found":** install Xcode Command Line Tools (`xcode-select
   --install`); macOS normally ships `expect` at `/usr/bin/expect`.
 - **Check the schedule by hand:** the schedule is a launchd agent named
