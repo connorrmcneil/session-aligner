@@ -47,6 +47,14 @@ WAKE_SCRIPT="${SCRIPT_DIR}/schedule-wakes.sh"
 WAKE_LOG="${SCRIPT_DIR}/wake.log"
 WAKE_DAEMON_LOG="${SCRIPT_DIR}/wake.daemon.log"
 
+# launchd agent identity (the preflight keep-awake, runs as you - NOT root).
+# It fires at each wake time (window start minus WAKE_LEAD_MIN) and runs
+# caffeinate so the Mac stays awake until the ping fires on time.
+PREFLIGHT_LABEL="com.sessionaligner.preflight"
+PREFLIGHT_PLIST_FILE="${HOME}/Library/LaunchAgents/${PREFLIGHT_LABEL}.plist"
+PREFLIGHT_SCRIPT="${SCRIPT_DIR}/preflight-awake.sh"
+PREFLIGHT_LOG="${SCRIPT_DIR}/preflight.log"
+
 # Where install.sh puts the global command (used by uninstall).
 SELF_LINK="/usr/local/bin/session-aligner"
 
@@ -58,21 +66,38 @@ MARKER_END="# <<< session-aligner (managed) <<<"
 DEFAULT_TIMES="05:00 10:00 15:00"
 DEFAULT_DAYS="*"   # "*" = every day; "1-5" = weekdays (Mon-Fri)
 
+# Wake/preflight defaults. The Mac wakes WAKE_LEAD_MIN before each window start,
+# then caffeinate keeps it awake for KEEP_AWAKE_MIN (which must outlast the lead so
+# it spans past the ping). Defaults: wake 15 min early, hold awake 20 min (lead+5).
+DEFAULT_WAKE_LEAD_MIN=15    # range 1-60
+DEFAULT_KEEP_AWAKE_MIN=20   # range 5-90
+
 # ---------- config helpers ----------
 
 load_config() {
   TIMES="$DEFAULT_TIMES"
   DAYS="$DEFAULT_DAYS"
+  WAKE_LEAD_MIN="$DEFAULT_WAKE_LEAD_MIN"
+  KEEP_AWAKE_MIN="$DEFAULT_KEEP_AWAKE_MIN"
   if [ -f "$CONFIG_FILE" ]; then
     # shellcheck disable=SC1090
     . "$CONFIG_FILE"
   fi
+  # Clamp to sane ranges in case aligner.config was hand-edited.
+  case "$WAKE_LEAD_MIN" in *[!0-9]*|'') WAKE_LEAD_MIN="$DEFAULT_WAKE_LEAD_MIN" ;; esac
+  [ "$WAKE_LEAD_MIN" -lt 1 ]  && WAKE_LEAD_MIN=1
+  [ "$WAKE_LEAD_MIN" -gt 60 ] && WAKE_LEAD_MIN=60
+  case "$KEEP_AWAKE_MIN" in *[!0-9]*|'') KEEP_AWAKE_MIN="$DEFAULT_KEEP_AWAKE_MIN" ;; esac
+  [ "$KEEP_AWAKE_MIN" -lt 5 ]  && KEEP_AWAKE_MIN=5
+  [ "$KEEP_AWAKE_MIN" -gt 90 ] && KEEP_AWAKE_MIN=90
 }
 
 save_config() {
   {
     echo "TIMES=\"${TIMES}\""
     echo "DAYS=\"${DAYS}\""
+    echo "WAKE_LEAD_MIN=\"${WAKE_LEAD_MIN}\""
+    echo "KEEP_AWAKE_MIN=\"${KEEP_AWAKE_MIN}\""
   } > "$CONFIG_FILE"
 }
 
@@ -84,6 +109,13 @@ validate_times() {
     echo "$t" | grep -qE '^([01]?[0-9]|2[0-3]):[0-5][0-9]$' || return 1
   done
   return 0
+}
+
+# Validate that $1 is an integer within [$2, $3].
+validate_int() {
+  local v="$1" lo="$2" hi="$3"
+  case "$v" in *[!0-9]*|'') return 1 ;; esac
+  [ "$v" -ge "$lo" ] && [ "$v" -le "$hi" ]
 }
 
 human_days() {
@@ -100,6 +132,25 @@ launchd_weekdays() {
     "1-5") echo "1 2 3 4 5" ;;
     *) echo "" ;;
   esac
+}
+
+# Wake/preflight times = each window start minus WAKE_LEAD_MIN, as "HH:MM".
+# Clamped to 00:00 (mirrors schedule-wakes.sh) so the wake daemon and the
+# preflight LaunchAgent always agree on the wake time. Needs load_config first.
+preflight_times() {
+  local t h m total
+  for t in $TIMES; do
+    h=$((10#${t%%:*}))
+    m=$((10#${t##*:}))
+    total=$((h * 60 + m - WAKE_LEAD_MIN))
+    [ "$total" -lt 0 ] && total=0
+    printf '%02d:%02d\n' $((total / 60)) $((total % 60))
+  done
+}
+
+# Same as preflight_times but comma-separated on one line, for status display.
+preflight_times_csv() {
+  preflight_times | paste -sd, - | sed 's/,/, /g'
 }
 
 # ---------- launchd plist ----------
@@ -228,6 +279,72 @@ build_wake_plist() {
 EOF
 }
 
+# ---------- preflight keep-awake LaunchAgent (runs as you, not root) ----------
+
+# Build the user LaunchAgent plist that runs preflight-awake.sh at each wake time
+# (window start minus WAKE_LEAD_MIN). Needs load_config first.
+build_preflight_plist() {
+  local weekdays wd
+  weekdays="$(launchd_weekdays)"
+
+  cat <<EOF
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>${PREFLIGHT_LABEL}</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>/bin/bash</string>
+    <string>${PREFLIGHT_SCRIPT}</string>
+    <string>${SCRIPT_DIR}</string>
+  </array>
+  <key>StartCalendarInterval</key>
+  <array>
+EOF
+
+  local wt hour minute
+  for wt in $(preflight_times); do
+    hour=$((10#${wt%%:*}))
+    minute=$((10#${wt##*:}))
+    if [ -n "$weekdays" ]; then
+      for wd in $weekdays; do
+        plist_interval "$hour" "$minute" "$wd"
+      done
+    else
+      plist_interval "$hour" "$minute"
+    fi
+  done
+
+  cat <<EOF
+  </array>
+  <key>StandardOutPath</key>
+  <string>${PREFLIGHT_LOG}</string>
+  <key>StandardErrorPath</key>
+  <string>${PREFLIGHT_LOG}</string>
+</dict>
+</plist>
+EOF
+}
+
+preflight_installed() { [ -f "$PREFLIGHT_PLIST_FILE" ]; }
+
+install_preflight() {
+  chmod +x "$PREFLIGHT_SCRIPT" 2>/dev/null || true
+  mkdir -p "$(dirname "$PREFLIGHT_PLIST_FILE")"
+  build_preflight_plist > "$PREFLIGHT_PLIST_FILE"
+  launchctl unload "$PREFLIGHT_PLIST_FILE" 2>/dev/null || true
+  launchctl load "$PREFLIGHT_PLIST_FILE"
+}
+
+remove_preflight() {
+  if [ -f "$PREFLIGHT_PLIST_FILE" ]; then
+    launchctl unload "$PREFLIGHT_PLIST_FILE" 2>/dev/null || true
+    rm -f "$PREFLIGHT_PLIST_FILE"
+  fi
+}
+
 cmd_wake() {
   load_config
   case "${1:-status}" in
@@ -237,15 +354,17 @@ cmd_wake() {
       build_wake_plist > "$tmp"
       chmod +x "$WAKE_SCRIPT" 2>/dev/null || true
 
-      echo "Setting up auto-wake so your Mac wakes ~2 min before each window"
-      echo "start (${TIMES})."
+      echo "Setting up auto-wake so your Mac wakes ${WAKE_LEAD_MIN} min before each window"
+      echo "start (${TIMES}) and stays awake until the ping fires."
+      echo
+      echo "Wake times: $(preflight_times_csv)   Ping times: $(printf '%s' "$TIMES" | tr ' ' ',' | sed 's/,/, /g')"
       echo
       echo "Auto-wake needs your Mac password once because macOS requires admin"
       echo "access to schedule system wake events (via pmset). Your password is"
       echo "handled by macOS sudo and is NOT stored by Session Aligner. The helper"
       echo "only keeps wake events scheduled before your chosen window start times"
-      echo "- it never sees your Claude account. (The normal ping schedule runs as"
-      echo "you and needs no admin access.)"
+      echo "- it never sees your Claude account. (The ping schedule and the preflight"
+      echo "keep-awake both run as you and need no admin access.)"
       echo
 
       # One sudo block = a single password prompt (sudo caches for the rest).
@@ -263,10 +382,15 @@ cmd_wake() {
       ' _ "$WAKE_PLIST_FILE" "$tmp" "$WAKE_SCRIPT" "$SCRIPT_DIR"
 
       rm -f "$tmp"
+
+      # Preflight keep-awake LaunchAgent runs as you - no sudo needed.
+      install_preflight
+
       echo
-      echo "Done. The helper refreshes wakes at load/startup and hourly (and usually"
-      echo "soon after the Mac wakes, when a missed hourly run catches up)."
-      echo "Check it with: ${CMD_NAME} wake status"
+      echo "Done. The root helper refreshes wakes at load/startup and hourly (and"
+      echo "usually soon after the Mac wakes, when a missed hourly run catches up)."
+      echo "The preflight keep-awake agent runs caffeinate for ${KEEP_AWAKE_MIN} min at each"
+      echo "wake time so the ping lands on time. Check it with: ${CMD_NAME} wake status"
       ;;
     off)
       echo "Removing the auto-wake helper (asks for your Mac password)."
@@ -278,7 +402,53 @@ cmd_wake() {
         bash "$script" "$proj" cancel 2>/dev/null || true
         pmset repeat cancel 2>/dev/null || true
       ' _ "$WAKE_PLIST_FILE" "$WAKE_SCRIPT" "$SCRIPT_DIR"
+      # The preflight keep-awake agent runs as you - remove it without sudo.
+      remove_preflight
       echo "Done."
+      ;;
+    lead)
+      local n="${2:-}"
+      if ! validate_int "$n" 1 60; then
+        echo "Invalid wake lead. Use a whole number of minutes, 1-60." >&2
+        echo "Example: ${CMD_NAME} wake lead 15" >&2
+        exit 1
+      fi
+      WAKE_LEAD_MIN="$n"
+      if [ "$KEEP_AWAKE_MIN" -le "$WAKE_LEAD_MIN" ]; then
+        KEEP_AWAKE_MIN=$((WAKE_LEAD_MIN + 5))
+        [ "$KEEP_AWAKE_MIN" -gt 90 ] && KEEP_AWAKE_MIN=90
+        echo "Note: keep-awake must outlast the wake lead, so it was raised to"
+        echo "${KEEP_AWAKE_MIN} min (caffeinate would otherwise expire before the ping)."
+      fi
+      save_config
+      echo "Wake lead set to ${WAKE_LEAD_MIN} min. Mac will wake at: $(preflight_times_csv)"
+      if wake_installed; then
+        echo "Applying now (re-seeds wakes and rebuilds the preflight agent)..."
+        cmd_wake on
+      else
+        echo "Auto-wake is OFF; this applies when you run '${CMD_NAME} wake on'."
+      fi
+      ;;
+    keep-awake)
+      local n="${2:-}"
+      if ! validate_int "$n" 5 90; then
+        echo "Invalid keep-awake. Use a whole number of minutes, 5-90." >&2
+        echo "Example: ${CMD_NAME} wake keep-awake 20" >&2
+        exit 1
+      fi
+      if [ "$n" -le "$WAKE_LEAD_MIN" ]; then
+        echo "Note: keep-awake ($n) must be greater than the wake lead"
+        echo "(${WAKE_LEAD_MIN}) or caffeinate expires before the ping fires."
+        n=$((WAKE_LEAD_MIN + 5))
+        [ "$n" -gt 90 ] && n=90
+        echo "Raised keep-awake to ${n} min."
+      fi
+      KEEP_AWAKE_MIN="$n"
+      save_config
+      echo "Keep-awake set to ${KEEP_AWAKE_MIN} min (caffeinate duration at each wake)."
+      # The preflight script reads KEEP_AWAKE_MIN at runtime, so no rebuild is
+      # required; rebuild anyway when installed so the agent stays tidy.
+      if preflight_installed; then install_preflight; fi
       ;;
     status|*)
       if wake_installed; then
@@ -286,6 +456,17 @@ cmd_wake() {
       else
         echo "Auto-wake helper: OFF (run '${CMD_NAME} wake on')"
       fi
+      if preflight_installed; then
+        echo "Preflight keep-awake: ON (${PREFLIGHT_LABEL})"
+      else
+        echo "Preflight keep-awake: OFF"
+      fi
+      echo
+      printf '%-15s %s\n' "Window starts:" "$(printf '%s' "$TIMES" | tr ' ' ',' | sed 's/,/, /g')"
+      printf '%-15s %s\n' "Wake lead:" "${WAKE_LEAD_MIN} minutes"
+      printf '%-15s %s\n' "Keep-awake:" "${KEEP_AWAKE_MIN} minutes"
+      printf '%-15s %s\n' "Wake times:" "$(preflight_times_csv)"
+      printf '%-15s %s\n' "Ping times:" "$(printf '%s' "$TIMES" | tr ' ' ',' | sed 's/,/, /g')"
       echo
       echo "Upcoming wakes before your window starts:"
       local any=0 ep
@@ -513,6 +694,10 @@ cmd_status() {
   printf '%-15s %s\n' "Auto-wake:" "$wake_on"
   printf '%-15s %s\n' "Days:" "$(human_days "$DAYS")"
   printf '%-15s %s\n' "Window starts:" "$starts"
+  printf '%-15s %s\n' "Ping times:" "$starts"
+  printf '%-15s %s\n' "Wake lead:" "${WAKE_LEAD_MIN} minutes"
+  printf '%-15s %s\n' "Keep-awake:" "${KEEP_AWAKE_MIN} minutes"
+  printf '%-15s %s\n' "Wake times:" "$(preflight_times_csv)"
 
   local nw; nw="$(next_window_epoch)"
   if [ -n "$nw" ]; then printf '%-15s %s\n' "Next start:" "$(human_when "$nw")"; fi
@@ -609,13 +794,15 @@ cmd_logs() {
   echo "-------------------------------"
   echo
   case "$which" in
-    ping)   _block "Ping log"        "$LOG_FILE"        "No ping log yet. Run: ${CMD_NAME} test" ;;
-    wake)   _block "Wake log"        "$WAKE_LOG"        "No wake log yet. Run: ${CMD_NAME} wake on" ;;
-    daemon) _block "Wake daemon log" "$WAKE_DAEMON_LOG" "No wake daemon log yet." ;;
+    ping)      _block "Ping log"        "$LOG_FILE"        "No ping log yet. Run: ${CMD_NAME} test" ;;
+    wake)      _block "Wake log"        "$WAKE_LOG"        "No wake log yet. Run: ${CMD_NAME} wake on" ;;
+    daemon)    _block "Wake daemon log" "$WAKE_DAEMON_LOG" "No wake daemon log yet." ;;
+    preflight) _block "Preflight log"   "$PREFLIGHT_LOG"   "No preflight log yet. Appears after a wake fires." ;;
     *)
       _block "Ping log"        "$LOG_FILE"        "No ping log yet. Run: ${CMD_NAME} test"
       _block "Wake log"        "$WAKE_LOG"        "No wake log yet. Run: ${CMD_NAME} wake on"
       _block "Wake daemon log" "$WAKE_DAEMON_LOG" "No wake daemon log yet."
+      _block "Preflight log"   "$PREFLIGHT_LOG"   "No preflight log yet. Appears after a wake fires."
       ;;
   esac
 }
@@ -644,13 +831,14 @@ cmd_doctor() {
   else cross "expect not found" "Install Xcode Command Line Tools: xcode-select --install"; fi
 
   local f missing=""
-  for f in aligner.sh ping.sh ping.exp schedule-wakes.sh; do
+  for f in aligner.sh ping.sh ping.exp schedule-wakes.sh preflight-awake.sh; do
     [ -f "${SCRIPT_DIR}/$f" ] || missing="$missing $f"
   done
   if [ -z "$missing" ]; then pass "all scripts present"
   else cross "missing scripts:$missing" "Re-download the project files."; fi
 
-  if [ -x "${SCRIPT_DIR}/ping.sh" ] && [ -x "${SCRIPT_DIR}/schedule-wakes.sh" ]; then
+  if [ -x "${SCRIPT_DIR}/ping.sh" ] && [ -x "${SCRIPT_DIR}/schedule-wakes.sh" ] \
+     && [ -x "${SCRIPT_DIR}/preflight-awake.sh" ]; then
     pass "scripts are executable"
   else
     cross "scripts are not executable" "Run: ${CMD_NAME} repair"
@@ -696,7 +884,7 @@ cmd_repair() {
   echo "stopped). Run '${CMD_NAME} stop' afterwards if you wanted it off."
   echo
   chmod +x "${SCRIPT_DIR}/aligner.sh" "${SCRIPT_DIR}/ping.sh" "${SCRIPT_DIR}/ping.exp" \
-           "${SCRIPT_DIR}/schedule-wakes.sh" 2>/dev/null || true
+           "${SCRIPT_DIR}/schedule-wakes.sh" "${SCRIPT_DIR}/preflight-awake.sh" 2>/dev/null || true
   echo "  Scripts made executable"
 
   if [ ! -f "$CONFIG_FILE" ]; then
@@ -710,7 +898,7 @@ cmd_repair() {
     echo "Reloading the auto-wake helper needs your Mac password (macOS requires"
     echo "admin access for pmset). Your password is not stored."
     cmd_wake on
-    echo "  Auto-wake helper reloaded; upcoming wakes refreshed"
+    echo "  Auto-wake helper reloaded; upcoming wakes + preflight keep-awake refreshed"
   fi
 
   echo
@@ -739,7 +927,9 @@ cmd_uninstall() {
   remove_schedule
   echo "Ping schedule stopped."
   if wake_installed; then
-    cmd_wake off
+    cmd_wake off    # also removes the preflight keep-awake agent
+  else
+    remove_preflight
   fi
 
   echo
@@ -747,7 +937,7 @@ cmd_uninstall() {
   read -r rl
   case "$(printf '%s' "${rl:-n}" | tr '[:upper:]' '[:lower:]')" in
     y|yes)
-      rm -f "$CONFIG_FILE" "$LOG_FILE" "$LAUNCHD_LOG" "$WAKE_LOG" "$WAKE_DAEMON_LOG"
+      rm -f "$CONFIG_FILE" "$LOG_FILE" "$LAUNCHD_LOG" "$WAKE_LOG" "$WAKE_DAEMON_LOG" "$PREFLIGHT_LOG"
       echo "Removed logs and config."
       ;;
     *) echo "Kept logs and config." ;;
@@ -787,10 +977,12 @@ Usage:
   ${CMD_NAME} times "05:00 10:00 15:00"
   ${CMD_NAME} start | stop
   ${CMD_NAME} wake on | off | status
+  ${CMD_NAME} wake lead <min>        (how early to wake, 1-60; default 15)
+  ${CMD_NAME} wake keep-awake <min>  (caffeinate duration, 5-90; default 20)
   ${CMD_NAME} next
   ${CMD_NAME} doctor
   ${CMD_NAME} repair
-  ${CMD_NAME} logs [ping|wake|daemon]
+  ${CMD_NAME} logs [ping|wake|daemon|preflight]
   ${CMD_NAME} uninstall
 
 Default/recommended window start times:

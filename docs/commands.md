@@ -24,10 +24,12 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner on` | Same as `start` | No |
 | `session-aligner off` | Same as `stop` | No |
 | `session-aligner next` | Show next window start and next wake | No |
-| `session-aligner wake on` | Enable auto-wake before each window start | Yes (once) |
-| `session-aligner wake off` | Remove auto-wake helper and cancel wakes | Yes |
-| `session-aligner wake status` | Show auto-wake helper + upcoming wakes | No |
+| `session-aligner wake on` | Enable auto-wake + preflight keep-awake before each window start | Yes (once) |
+| `session-aligner wake off` | Remove auto-wake helper, preflight agent, and cancel wakes | Yes |
+| `session-aligner wake status` | Show helpers, wake lead, keep-awake, wake/ping times, upcoming wakes | No |
 | `session-aligner wake status --raw` | Same, plus raw `pmset` output | No |
+| `session-aligner wake lead <min>` | Set how early the Mac wakes (1-60, default 15) | Yes, if auto-wake is installed |
+| `session-aligner wake keep-awake <min>` | Set the preflight caffeinate duration (5-90, default 20) | No |
 | `session-aligner doctor` | Diagnose common setup problems | No |
 | `session-aligner check` | Same as `doctor` | No |
 | `session-aligner repair` | Fix common problems (reload agents, chmod) | Yes, if auto-wake is installed |
@@ -35,6 +37,7 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner logs ping` | Show recent ping log only | No |
 | `session-aligner logs wake` | Show recent wake log only | No |
 | `session-aligner logs daemon` | Show wake daemon log only | No |
+| `session-aligner logs preflight` | Show preflight keep-awake log only | No |
 | `session-aligner uninstall` | Stop schedule, remove auto-wake, optional cleanup | Yes, if auto-wake is installed |
 | `session-aligner help` | Show built-in help | No |
 
@@ -171,8 +174,9 @@ session-aligner test
 ### `session-aligner status`
 
 **What it does:** Friendly overview: schedule on/off, auto-wake on/off, days,
-window starts, next start, next wake, Claude Code path, power state, last ping,
-last wake refresh, and upcoming wakes.
+window starts, ping times, wake lead, keep-awake duration, computed wake times,
+next start, next wake, Claude Code path, power state, last ping, last wake refresh,
+and upcoming wakes.
 
 **When to use it:** Daily check that everything looks right.
 
@@ -202,14 +206,23 @@ session-aligner next
 
 ## Auto-wake
 
-Auto-wake makes your Mac wake ~2 minutes before each window start so pings can
-fire even while the Mac is asleep (lid closed + plugged in).
+Auto-wake makes your Mac wake **15 minutes before** each window start (the
+configurable *wake lead*) so pings can fire even while the Mac is asleep (lid
+closed + plugged in). The **ping** still fires at the exact window start — only the
+*wake* is early, to give macOS time to come fully awake.
+
+To stop the Mac dozing off again between the early wake and the ping, auto-wake also
+installs a **preflight keep-awake** LaunchAgent (`com.sessionaligner.preflight`, runs
+as you — no admin needed) that runs `caffeinate -dimsu` for 20 minutes at each wake
+time. Timeline (defaults): **04:45** wake + caffeinate → **05:00** ping → **05:05**
+caffeinate expires.
 
 ### `session-aligner wake on`
 
 **What it does:** Installs a root background helper (`com.sessionaligner.wake`)
-that keeps one-time `pmset` wake events scheduled before each window start. Seeds
-wakes immediately.
+that keeps one-time `pmset` wake events scheduled `WAKE_LEAD_MIN` minutes before each
+window start, and a user-level preflight keep-awake agent
+(`com.sessionaligner.preflight`). Seeds wakes immediately.
 
 **When to use it:** Your Mac may be asleep at a window start time (especially
 overnight).
@@ -230,8 +243,9 @@ admin access.
 
 ### `session-aligner wake off`
 
-**What it does:** Removes the auto-wake helper, cancels scheduled wake events
-created by Session Aligner, and cancels any old repeating wake.
+**What it does:** Removes the auto-wake helper and the preflight keep-awake agent,
+cancels scheduled wake events created by Session Aligner, and cancels any old
+repeating wake.
 
 **When to use it:** You no longer want the Mac to wake itself for window starts.
 
@@ -248,14 +262,51 @@ and cancel `pmset` events).
 
 ### `session-aligner wake status`
 
-**What it does:** Shows whether the auto-wake helper is installed and lists
-upcoming wakes in human-readable form (`today at 14:58`, etc.).
+**What it does:** Shows whether the auto-wake helper and preflight keep-awake agent
+are installed, plus the window starts, wake lead, keep-awake duration, computed wake
+times and ping times, and the upcoming wakes in human-readable form
+(`today at 14:45`, etc.).
 
 **Example:**
 
 ```bash
 session-aligner wake status
 session-aligner wake status --raw    # append raw pmset -g sched output
+```
+
+---
+
+### `session-aligner wake lead <min>`
+
+**What it does:** Sets how many minutes before each window start the Mac wakes
+(`WAKE_LEAD_MIN`, range 1-60, default 15). If auto-wake is installed it re-applies
+immediately (re-seeds `pmset` wakes and rebuilds the preflight agent); otherwise the
+new value applies next time you run `wake on`. If the current keep-awake duration is
+not longer than the new lead, it is automatically raised to `lead + 5` so
+`caffeinate` still spans past the ping.
+
+**Example:**
+
+```bash
+session-aligner wake lead 15
+session-aligner wake lead 20
+```
+
+---
+
+### `session-aligner wake keep-awake <min>`
+
+**What it does:** Sets how long the preflight `caffeinate` keeps the Mac awake
+(`KEEP_AWAKE_MIN`, range 5-90, default 20). The preflight script reads this at run
+time, so the change takes effect at the next wake with no admin access needed. Values
+not greater than the wake lead are raised to `lead + 5` (otherwise caffeinate would
+expire before the ping fires).
+
+**Example:**
+
+```bash
+session-aligner wake keep-awake 20
+session-aligner wake keep-awake 25
 ```
 
 ---
@@ -286,7 +337,8 @@ session-aligner doctor
 
 - Makes scripts executable
 - Reloads the ping LaunchAgent
-- If auto-wake is installed, reloads the wake helper and refreshes upcoming wakes
+- If auto-wake is installed, reloads the wake helper, refreshes upcoming wakes, and
+  rebuilds the preflight keep-awake agent
 
 **When to use it:** After moving the project folder, permission issues, or when
 `doctor` suggests it.
@@ -322,6 +374,7 @@ session-aligner logs daemon    # wake.daemon.log only
 | `aligner.log` | Ping results, token usage, SUCCESS/FAILURE |
 | `wake.log` | When wakes were scheduled or cancelled |
 | `wake.daemon.log` | Output from the auto-wake LaunchDaemon |
+| `preflight.log` | Preflight keep-awake start/finish (caffeinate) |
 | `aligner.launchd.log` | Output from the ping LaunchAgent |
 
 ---
@@ -333,7 +386,7 @@ session-aligner logs daemon    # wake.daemon.log only
 **What it does:** Interactive uninstall:
 
 1. Stops the ping schedule
-2. Removes the auto-wake helper and cancels scheduled wakes
+2. Removes the auto-wake helper and preflight keep-awake agent, and cancels scheduled wakes
 3. Optionally removes logs and config (default: keep them)
 4. Optionally removes `/usr/local/bin/session-aligner` (default: ask)
 
@@ -384,8 +437,8 @@ so a fresh Claude 5-hour window begins:
 | `10:00` | Late morning window |
 | `15:00` | Afternoon window |
 
-Auto-wake schedules wakes ~2 minutes before each (e.g. `04:58`, `09:58`,
-`14:58`).
+Auto-wake schedules wakes 15 minutes before each (e.g. `04:45`, `09:45`,
+`14:45`), and the preflight keep-awake holds the Mac awake through the ping.
 
 This does **not** give you more usage. It only aligns existing windows with your
 day.

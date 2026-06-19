@@ -140,7 +140,7 @@ also run `session-aligner doctor` any time to diagnose problems.
 
 ### About auto-wake and your Mac password
 
-Auto-wake (`session-aligner wake on`) makes the Mac wake ~2 minutes before **every**
+Auto-wake (`session-aligner wake on`) makes the Mac wake **15 minutes before** every
 window start so pings fire even while you're asleep. It installs a tiny background
 helper that keeps the upcoming wakes scheduled automatically — you don't have to
 run it again.
@@ -156,6 +156,39 @@ See "Will it run while the Mac is asleep?" below.
 > (`schedule-wakes.sh`) straight from **this repo folder** — the daemon points at the
 > script where it lives, so don't move or delete the folder while auto-wake is on
 > (if you do, run `session-aligner wake off`, relocate, then `wake on` again).
+
+### Wake time vs. ping time (why the Mac wakes early)
+
+There are two different moments, and keeping them apart is the whole point:
+
+- **Ping time** *is* the Claude window start (`05:00`, `10:00`, `15:00`). The ping is
+  what opens the 5-hour window, so it must land at the exact start time — it is never
+  moved earlier.
+- **Wake time** is **15 minutes earlier** (`04:45`, `09:45`, `14:45`). Waking early
+  gives macOS time to come *fully* awake — a freshly-woken Mac is sluggish, and a
+  2-minute lead used to leave pings firing 10–15 minutes late.
+
+To stop the Mac from dozing off again between the early wake and the ping, auto-wake
+also installs a small **preflight keep-awake** agent (`com.sessionaligner.preflight`,
+runs as you, no admin needed). At each wake time it runs macOS `caffeinate` for
+20 minutes, holding the Mac awake from `04:45` until ~`05:05` — straight through the
+`05:00` ping. Timeline: **04:45** wake + caffeinate → **05:00** ping fires on time →
+**05:05** caffeinate expires and the Mac may sleep again.
+
+Both numbers are configurable:
+
+```bash
+session-aligner wake lead 15        # wake this many minutes early (1-60, default 15)
+session-aligner wake keep-awake 20  # caffeinate duration in minutes (5-90, default 20)
+session-aligner wake status         # shows window starts, wake lead, keep-awake, wake/ping times
+```
+
+Keep-awake must outlast the wake lead (so caffeinate spans past the ping); if you set
+it too low it is automatically raised to `lead + 5`.
+
+You should **not** need to change any macOS sleep settings for the default setup —
+auto-wake handles waking and staying awake on its own. Just keep the Mac **plugged in**
+for reliable wakes with the lid closed (see the power table below).
 
 ---
 
@@ -175,6 +208,8 @@ See "Will it run while the Mac is asleep?" below.
 | Auto-wake before each window start | `session-aligner wake on` |
 | Stop the auto-wake helper | `session-aligner wake off` |
 | See the helper + upcoming wakes | `session-aligner wake status` |
+| Change how early the Mac wakes | `session-aligner wake lead 15` |
+| Change the keep-awake duration | `session-aligner wake keep-awake 20` |
 | Remove everything | `session-aligner uninstall` |
 
 If you didn't run `./install.sh`, use `./aligner.sh` instead of `session-aligner`
@@ -245,11 +280,14 @@ match your real day.
 ## Will it run while the Mac is asleep?
 
 A sleeping Mac can't ping on its own, so `session-aligner wake on` installs a small
-background helper that schedules a wake ~2 minutes before **every** window start
-(e.g. 04:58, 09:58, 14:58 for the default 05:00/10:00/15:00). macOS only allows one
-*repeating* wake per day, so the helper keeps a few days of one-time wakes lined up
-and refreshes them at load/startup and hourly (and usually soon after the Mac wakes,
-when a missed hourly run catches up). You set it up once and forget it.
+background helper that schedules a wake **15 minutes before** every window start
+(e.g. 04:45, 09:45, 14:45 for the default 05:00/10:00/15:00) and a preflight
+`caffeinate` that holds the Mac awake from the wake until just past the ping. macOS
+only allows one *repeating* wake per day, so the helper keeps a few days of one-time
+wakes lined up and refreshes them at load/startup and hourly (and usually soon after
+the Mac wakes, when a missed hourly run catches up). You set it up once and forget it.
+The wake is deliberately early — see [Wake time vs. ping time](#wake-time-vs-ping-time-why-the-mac-wakes-early)
+for why pings used to land 10–15 minutes late with a shorter lead.
 
 This is also the only part of the tool that needs your Mac password: scheduling
 system wake events requires admin/root access through `pmset`. The password is
@@ -286,8 +324,9 @@ forever. Here's why:
   called `com.sessionaligner.wake`) that re-runs `schedule-wakes.sh` **at load/startup**
   and **every hour**, and **usually soon after the Mac wakes** (a missed hourly run
   catches up shortly after wake — it is not an explicit wake trigger).
-- Each time it runs, it makes sure the next ~3 days of wakes (2 minutes before each
-  window start) are scheduled, adding only the ones that are missing.
+- Each time it runs, it makes sure the next ~3 days of wakes (`WAKE_LEAD_MIN` minutes
+  before each window start — 15 by default) are scheduled, adding only the ones that
+  are missing.
 - One-time wakes disappear automatically after they fire, so the list stays short
   and is constantly pushed forward — today's run schedules out to day 3, tomorrow's
   run adds day 4, and so on, with no end.

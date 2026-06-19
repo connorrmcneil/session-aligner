@@ -54,7 +54,8 @@ echo "Checking requirements..."
 
 # Make our scripts executable.
 chmod +x "${REPO_DIR}/aligner.sh" "${REPO_DIR}/ping.sh" "${REPO_DIR}/ping.exp" \
-         "${REPO_DIR}/schedule-wakes.sh" "${REPO_DIR}/install.sh" 2>/dev/null || true
+         "${REPO_DIR}/schedule-wakes.sh" "${REPO_DIR}/preflight-awake.sh" \
+         "${REPO_DIR}/install.sh" 2>/dev/null || true
 
 # macOS?
 if [ "$(uname -s)" = "Darwin" ]; then
@@ -80,7 +81,8 @@ else
 fi
 
 # Scripts executable?
-if [ -x "$ALIGNER" ] && [ -x "${REPO_DIR}/ping.sh" ] && [ -x "${REPO_DIR}/schedule-wakes.sh" ]; then
+if [ -x "$ALIGNER" ] && [ -x "${REPO_DIR}/ping.sh" ] && [ -x "${REPO_DIR}/schedule-wakes.sh" ] \
+   && [ -x "${REPO_DIR}/preflight-awake.sh" ]; then
   check "scripts are executable"
 else
   fail "could not make scripts executable - try: chmod +x *.sh ping.exp"

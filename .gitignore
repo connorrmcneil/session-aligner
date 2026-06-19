@@ -6,3 +6,6 @@
 
 # macOS
 .DS_Store
+
+# graphify knowledge-graph output (generated)
+graphify-out/
