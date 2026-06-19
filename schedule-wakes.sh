@@ -27,9 +27,15 @@ LOG_FILE="${PROJECT_DIR}/wake.log"
 # Defaults (overridden by aligner.config if present).
 TIMES="05:00 10:00 15:00"
 DAYS="*"
+WAKE_LEAD_MIN=15    # wake this many minutes before each ping time (config-driven)
+KEEP_AWAKE_MIN=20   # preflight caffeinate duration (read by preflight-awake.sh)
 [ -f "$CONFIG_FILE" ] && . "$CONFIG_FILE"
 
-WAKE_LEAD_MIN=2     # wake this many minutes before each ping time
+# Clamp lead to a sane range in case aligner.config was hand-edited.
+case "$WAKE_LEAD_MIN" in *[!0-9]*|'') WAKE_LEAD_MIN=15 ;; esac
+[ "$WAKE_LEAD_MIN" -lt 1 ]  && WAKE_LEAD_MIN=1
+[ "$WAKE_LEAD_MIN" -gt 60 ] && WAKE_LEAD_MIN=60
+
 HORIZON_DAYS=3      # schedule today + the next couple of days as a buffer
 
 run() {
