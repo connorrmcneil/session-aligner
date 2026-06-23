@@ -204,6 +204,8 @@ for reliable wakes with the lid closed (see the power table below).
 | Turn the schedule OFF | `session-aligner stop` |
 | Turn the schedule back ON | `session-aligner start` |
 | See a friendly status overview | `session-aligner status` |
+| **Quick health check (best one)** | `session-aligner report` |
+| Show the version | `session-aligner --version` |
 | See the next window start + wake | `session-aligner next` |
 | Diagnose problems | `session-aligner doctor` |
 | Fix common problems | `session-aligner repair` |
@@ -219,6 +221,13 @@ If you didn't run `./install.sh`, use `./aligner.sh` instead of `session-aligner
 (for example `./aligner.sh status`), run from inside the folder
 `/Users/connormcneil/Projects/session-aligner`. `start`/`stop` are the same as the
 older `on`/`off`, which still work too.
+
+**For a quick health check, run `session-aligner report`.** It's the most useful
+single command: it shows schedule/wake/preflight/retry state, the computed wake
+times, next start/wake, the last ping outcome, a tally of recent pings (how many
+started a fresh window vs. used an old one), and a **Warnings** section that only
+appears when something needs attention (on battery, auto-wake off, stale wake
+entries, last ping failed, etc.). It's informational and always exits 0.
 
 ## Example schedules
 
@@ -346,6 +355,13 @@ You may notice the same time listed **twice** in `wake status`. That's harmless 
 two wake events at the identical moment just wake the Mac once, and they expire on
 their own after firing. It does not cause double-pings (pinging is driven by a
 separate agent, `com.sessionaligner.ping`).
+
+## Known limitations
+
+For best reliability, keep the Mac plugged in overnight, especially in clamshell
+mode. macOS may delay scheduled wakes or LaunchAgent jobs when the lid is closed
+and the Mac is on battery. `session-aligner report` warns you when the Mac is on
+battery so you can catch this before it causes a missed window.
 
 ## Troubleshooting
 

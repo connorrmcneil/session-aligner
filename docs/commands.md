@@ -17,6 +17,8 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner setup` | Guided first-time setup | Only if you enable auto-wake |
 | `session-aligner status` | Friendly overview of schedule + health | No |
 | `session-aligner status --raw` | Same as status, plus raw `pmset` output | No |
+| `session-aligner report` | Full health summary + warnings (best quick check) | No |
+| `session-aligner version` / `--version` / `-v` | Print the version (`session-aligner 0.1.0`) | No |
 | `session-aligner test` | Send one tiny ping right now | No |
 | `session-aligner times "..."` | Change window start times | No |
 | `session-aligner start` | Turn the schedule ON | No |
@@ -190,6 +192,56 @@ and upcoming wakes.
 ```bash
 session-aligner status
 session-aligner status --raw    # append raw pmset -g sched output
+```
+
+---
+
+### `session-aligner report`
+
+**What it does:** A fuller, scan-friendly health summary — the best single command
+for checking whether the tool is healthy and recent pings are working. On top of the
+`status` fields it adds the **version**, **preflight** and **retry** state, a count of
+**recent ping outcomes** from the log, and a **Warnings** section.
+
+The recent-ping tally reads the last 50 outcome lines from `aligner.log` and reports:
+
+```text
+Recent pings:   8 fresh, 0 old-window, 0 used-existing, 0 unconfirmed, 0 failures
+```
+
+- **fresh** — `FRESH WINDOW STARTED` (a new 5-hour window opened)
+- **old-window** — `OLD WINDOW ACTIVE` (old window still active; a retry follows)
+- **used-existing** — `USED EXISTING WINDOW` (ping rode an existing window)
+- **unconfirmed** — `PING SENT (UNCONFIRMED)` (couldn't read `/usage`)
+- **failures** — `FAILURE` (timeout, not logged in, network/startup error)
+
+**Warnings** appear only when relevant — e.g. the Mac is on battery, the schedule /
+auto-wake / preflight is off, Claude Code is missing, the last ping wasn't a fresh
+window, there are no recent pings, or **stale wake entries** are detected (wake times
+in `pmset` that don't match the current wake lead, usually left over from an older
+lead — fix with `wake off && wake on`). `report` is informational and always exits 0,
+even when warnings are present.
+
+**When to use it:** Your go-to "is everything okay?" check, and the first thing to run
+if a window didn't start when you expected.
+
+**Example:**
+
+```bash
+session-aligner report
+```
+
+---
+
+### `session-aligner version`
+
+**What it does:** Prints the version, e.g. `session-aligner 0.1.0`. Also available as
+`--version` and `-v`.
+
+**Example:**
+
+```bash
+session-aligner --version
 ```
 
 ---
