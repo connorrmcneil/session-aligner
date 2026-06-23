@@ -12,6 +12,9 @@
 
 set -u
 
+# Bump on each release. Surfaced by `version`/`--version`/`-v` and `report`.
+VERSION="0.1.0"
+
 # Resolve the real folder this script lives in, even when invoked through the
 # /usr/local/bin/session-aligner symlink (so ping.sh, ping.exp, schedule-wakes.sh,
 # aligner.config and the logs are always found in the real repo, not in
@@ -838,6 +841,127 @@ EOF
   fi
 }
 
+cmd_version() {
+  echo "session-aligner ${VERSION}"
+}
+
+# Count recent ping outcomes from the ping log (last $1 matching lines, default
+# 50). Echoes "<fresh> <old> <used> <unconfirmed> <failures>". Returns 1 when
+# there are no outcome lines yet (so callers can warn about "no recent pings").
+count_recent_pings() {
+  local n="${1:-50}" lines
+  [ -f "$LOG_FILE" ] || { echo "0 0 0 0 0"; return 1; }
+  lines="$(grep -E 'FRESH WINDOW STARTED|OLD WINDOW ACTIVE|USED EXISTING WINDOW|PING SENT \(UNCONFIRMED\)|FAILURE' "$LOG_FILE" 2>/dev/null | tail -n "$n")"
+  [ -z "$lines" ] && { echo "0 0 0 0 0"; return 1; }
+  local f o u c x
+  f=$(printf '%s\n' "$lines" | grep -c 'FRESH WINDOW STARTED')
+  o=$(printf '%s\n' "$lines" | grep -c 'OLD WINDOW ACTIVE')
+  u=$(printf '%s\n' "$lines" | grep -c 'USED EXISTING WINDOW')
+  c=$(printf '%s\n' "$lines" | grep -c 'UNCONFIRMED')
+  x=$(printf '%s\n' "$lines" | grep -c 'FAILURE')
+  echo "$f $o $u $c $x"
+}
+
+# HH:MM wake times currently scheduled in pmset that are NOT in the expected set
+# (each window start minus the current wake lead). These are usually leftovers
+# from an earlier wake lead. Needs load_config first.
+stale_wake_times() {
+  local expected actual t
+  expected="$(preflight_times | sort -u)"
+  actual="$(upcoming_wake_epochs | while read -r ep; do date -r "$ep" +%H:%M; done | sort -u)"
+  for t in $actual; do
+    printf '%s\n' "$expected" | grep -qx "$t" || echo "$t"
+  done
+}
+
+# A fuller health summary than `status`: quick to scan, with a warnings section.
+# Always exits 0 (informational) - warnings do not make it fail.
+cmd_report() {
+  load_config
+
+  local sched_on="OFF" wake_on="OFF" preflight_on="OFF" retry_on="OFF"
+  is_installed && sched_on="ON"
+  wake_installed && wake_on="ON"
+  preflight_installed && preflight_on="ON"
+  [ "$RETRY_AFTER_ACTIVE_WINDOW" = "1" ] && retry_on="ON"
+
+  local starts; starts="$(printf '%s' "$TIMES" | tr ' ' ',' | sed 's/,/, /g')"
+  local cpath; cpath="$(find_claude_path || true)"
+  local on_ac=1; on_ac_power || on_ac=0
+
+  echo "Session Aligner Report"
+  echo
+  printf '%-15s %s\n' "Version:" "$VERSION"
+  printf '%-15s %s\n' "Schedule:" "$sched_on"
+  printf '%-15s %s\n' "Auto-wake:" "$wake_on"
+  printf '%-15s %s\n' "Preflight:" "$preflight_on"
+  printf '%-15s %s\n' "Retry:" "$retry_on"
+  printf '%-15s %s\n' "Days:" "$(human_days "$DAYS")"
+  echo
+  printf '%-15s %s\n' "Window starts:" "$starts"
+  printf '%-15s %s\n' "Ping times:" "$starts"
+  printf '%-15s %s\n' "Wake lead:" "${WAKE_LEAD_MIN} minutes"
+  printf '%-15s %s\n' "Keep-awake:" "${KEEP_AWAKE_MIN} minutes"
+  printf '%-15s %s\n' "Wake times:" "$(preflight_times_csv)"
+  echo
+
+  if [ -n "$cpath" ]; then printf '%-15s %s\n' "Claude Code:" "found at $cpath"
+  else printf '%-15s %s\n' "Claude Code:" "NOT found (install it and run /login)"; fi
+  if [ "$on_ac" -eq 1 ]; then printf '%-15s %s\n' "Power:" "plugged in"
+  else printf '%-15s %s\n' "Power:" "on battery"; fi
+
+  local nw; nw="$(next_window_epoch)"
+  [ -n "$nw" ] && printf '%-15s %s\n' "Next start:" "$(human_when "$nw")"
+  if [ "$wake_on" = "ON" ]; then
+    local fw; fw="$(upcoming_wake_epochs | head -n 1)"
+    [ -n "$fw" ] && printf '%-15s %s\n' "Next wake:" "$(human_when "$fw")"
+  fi
+  echo
+
+  local lp lr; lp="$(last_log_summary "$LOG_FILE" || true)"; lr="$(last_log_summary "$WAKE_LOG" || true)"
+  [ -n "$lp" ] && printf '%-15s %s\n' "Last ping:" "$lp"
+  [ -n "$lr" ] && printf '%-15s %s\n' "Last refresh:" "$lr"
+
+  local counts have_pings=1
+  counts="$(count_recent_pings 50)" || have_pings=0
+  set -- $counts
+  if [ "$have_pings" -eq 1 ]; then
+    printf '%-15s %s\n' "Recent pings:" "$1 fresh, $2 old-window, $3 used-existing, $4 unconfirmed, $5 failures"
+  else
+    printf '%-15s %s\n' "Recent pings:" "(none yet)"
+  fi
+
+  # ---- Warnings (informational only; never change the exit code) ----
+  local warnings=() stale
+  [ "$sched_on" = "OFF" ]    && warnings+=("Schedule is OFF; pings won't fire. Run '${CMD_NAME} start'.")
+  [ "$wake_on" = "OFF" ]     && warnings+=("Auto-wake is OFF; the Mac won't wake for window starts. Run '${CMD_NAME} wake on'.")
+  [ "$preflight_on" = "OFF" ] && warnings+=("Preflight keep-awake is OFF; a freshly-woken Mac may doze before the ping. Run '${CMD_NAME} wake on'.")
+  [ -z "$cpath" ]            && warnings+=("Claude Code not found; install it and run 'claude' then '/login'.")
+  [ "$on_ac" -eq 0 ]        && warnings+=("Mac is on battery; scheduled wakes are less reliable in clamshell mode.")
+  [ "$have_pings" -eq 0 ]   && warnings+=("No recent ping outcomes in the log yet. Try '${CMD_NAME} test'.")
+
+  case "${lp%% *}" in
+    FAILURE)       warnings+=("Last ping FAILED. See '${CMD_NAME} logs ping'.") ;;
+    UNCONFIRMED)   warnings+=("Last ping was UNCONFIRMED (couldn't read /usage). Check '/usage' in Claude Code.") ;;
+    USED-EXISTING) warnings+=("Last ping only USED an existing window (no fresh window started).") ;;
+    OLD-WINDOW)    warnings+=("Last ping hit an OLD window still active; a retry should have followed - check '${CMD_NAME} logs ping'.") ;;
+  esac
+
+  if [ "$wake_on" = "ON" ]; then
+    stale="$(stale_wake_times | paste -sd, - | sed 's/,/, /g')"
+    [ -n "$stale" ] && warnings+=("Stale wake entries detected: ${stale}. Run '${CMD_NAME} wake off && ${CMD_NAME} wake on'.")
+  fi
+
+  if [ "${#warnings[@]}" -gt 0 ]; then
+    echo
+    echo "Warnings:"
+    local w
+    for w in "${warnings[@]}"; do printf '  * %s\n' "$w"; done
+  fi
+
+  return 0
+}
+
 cmd_next() {
   load_config
   local nw; nw="$(next_window_epoch)"
@@ -1053,6 +1177,8 @@ Session Aligner
 Usage:
   ${CMD_NAME} setup
   ${CMD_NAME} status
+  ${CMD_NAME} report                 (full health summary + warnings)
+  ${CMD_NAME} version | --version | -v
   ${CMD_NAME} test
   ${CMD_NAME} times "05:00 10:00 15:00"
   ${CMD_NAME} start | stop
@@ -1091,6 +1217,8 @@ case "${1:-}" in
   status)       shift; cmd_status "${1:-}" ;;
   wake)         shift; cmd_wake "$@" ;;
   retry)        shift; cmd_retry "$@" ;;
+  report)       cmd_report ;;
+  version|--version|-v) cmd_version ;;
   next)         cmd_next ;;
   doctor|check) cmd_doctor ;;
   repair)       cmd_repair ;;
