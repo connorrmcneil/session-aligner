@@ -121,15 +121,27 @@ parse_reset_epoch() {
 #   PING_OUTCOME  FRESH | OLD | USED | UNCONFIRMED | FAIL_TIMEOUT | FAIL_LOGIN
 #                 | FAIL_NET | FAIL_START
 #   EXIT_CODE     suggested process exit code for this attempt
-#   RESET_EPOCH RESET_HHMM MINS_LEFT  (reset info when parsed)
+#   RESET_EPOCH RESET_HHMM  (reset info when parsed)
+#   MINS_LEFT_FROM_START  minutes from PING START to reset (classification basis)
+#   MINS_LEFT             minutes from now/parse time to reset (display only)
+#   PING_START_EPOCH PING_END_EPOCH PING_DURATION_SEC  (timing)
 #   SESSION_LINE PCT SNIPPET TOKENS_LINE  (proof/details for logging)
-# Honours test hooks: FAKE_CLEAN (skip the real spawn, use it as the output) and
-# FORCE_RESET_EPOCH (bypass the parser with a fixed epoch).
+# Classification uses PING START time, not completion/parse time: a slow ping (a
+# busy Mac, a long Claude reply) can finish many minutes after it began, and a
+# window that was fresh at start would otherwise be misread as "used existing".
+# Honours test hooks: FAKE_CLEAN (skip the real spawn, use it as the output),
+# FORCE_RESET_EPOCH (bypass the parser with a fixed epoch), and FORCE_START_EPOCH
+# (pretend the ping started at this epoch, for late-parse / long-duration tests).
 run_one_ping() {
   PING_OUTCOME=""; EXIT_CODE=0
-  RESET_EPOCH=""; RESET_HHMM=""; MINS_LEFT=""
+  RESET_EPOCH=""; RESET_HHMM=""; MINS_LEFT=""; MINS_LEFT_FROM_START=""
+  PING_START_EPOCH=""; PING_END_EPOCH=""; PING_DURATION_SEC=0
   SESSION_LINE=""; PCT=""; SNIPPET=""; TOKENS_LINE=""
   local OUTPUT CLEAN STATUS
+
+  # Stamp the START time immediately before launching the ping (this attempt's
+  # own start, so a retry classifies from when the retry began).
+  PING_START_EPOCH="${FORCE_START_EPOCH:-$(date +%s)}"
 
   if [ -n "${FAKE_CLEAN:-}" ]; then
     CLEAN="$FAKE_CLEAN"; STATUS=0
@@ -147,6 +159,10 @@ run_one_ping() {
       CLEAN="$(printf '%s' "$OUTPUT" | LC_ALL=C tr -d '\000-\010\013\014\016-\037')"
     fi
   fi
+  # Stamp the END time once the Claude/expect interaction has finished.
+  PING_END_EPOCH="$(date +%s)"
+  PING_DURATION_SEC=$(( PING_END_EPOCH - PING_START_EPOCH ))
+  [ "$PING_DURATION_SEC" -lt 0 ] && PING_DURATION_SEC=0
   SNIPPET="$(printf '%s' "$CLEAN" | tr '\n' ' ' | tr -s ' ' | cut -c1-160)"
 
   # --- Proof extraction (best-effort) -------------------------------------
@@ -230,14 +246,29 @@ PY
   fi
 
   local now; now="$(date +%s)"
+  RESET_HHMM="$(date -j -f %s "$RESET_EPOCH" '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  # Minutes from now/parse time to reset - kept for reference/display only.
   MINS_LEFT=$(( (RESET_EPOCH - now + 59) / 60 ))
   [ "$MINS_LEFT" -lt 0 ] && MINS_LEFT=0
-  RESET_HHMM="$(date -j -f %s "$RESET_EPOCH" '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
+  # Minutes from PING START to reset - the basis for classification (round up).
+  MINS_LEFT_FROM_START=$(( (RESET_EPOCH - PING_START_EPOCH + 59) / 60 ))
+  [ "$MINS_LEFT_FROM_START" -lt 0 ] && MINS_LEFT_FROM_START=0
 
-  if   [ "$MINS_LEFT" -le "$RETRY_GRACE_MIN" ]; then PING_OUTCOME="OLD"
-  elif [ "$MINS_LEFT" -ge "$FRESH_MIN_MIN" ];   then PING_OUTCOME="FRESH"
+  if   [ "$MINS_LEFT_FROM_START" -le "$RETRY_GRACE_MIN" ]; then PING_OUTCOME="OLD"
+  elif [ "$MINS_LEFT_FROM_START" -ge "$FRESH_MIN_MIN" ];   then PING_OUTCOME="FRESH"
   else PING_OUTCOME="USED"; fi
   EXIT_CODE=0
+}
+
+# Human-readable duration: 45s, 4m12s, 34m.
+fmt_duration() {
+  local s="$1" m
+  if [ "$s" -ge 60 ]; then
+    m=$(( s / 60 )); s=$(( s % 60 ))
+    if [ "$s" -eq 0 ]; then echo "${m}m"; else echo "${m}m${s}s"; fi
+  else
+    echo "${s}s"
+  fi
 }
 
 # Log the result of the most recent run_one_ping. $1 (optional) is a prefix tag,
@@ -245,21 +276,27 @@ PY
 log_outcome() {
   local tag="${1:-}"
   [ -n "$SESSION_LINE" ] && log "SESSION: ${SESSION_LINE}${PCT:+ | ${PCT}}"
+  # A slow ping finishes long after it began; classification uses the START time,
+  # so flag it when the gap is large enough to matter (and could mislead a reader
+  # comparing the log timestamp to the reset time).
+  if [ "${PING_DURATION_SEC:-0}" -gt 180 ]; then
+    log "${tag}WARNING: ping took $(fmt_duration "$PING_DURATION_SEC") to complete; classification based on ping start time"
+  fi
   local detail=""
   [ -n "$TOKENS_LINE" ] && detail=" TOKENS: ${TOKENS_LINE}"
   case "$PING_OUTCOME" in
     FRESH)
-      log "${tag}FRESH WINDOW STARTED: resets at ${RESET_HHMM} (in ${MINS_LEFT}m).${detail}" ;;
+      log "${tag}FRESH WINDOW STARTED: resets at ${RESET_HHMM} (in ${MINS_LEFT_FROM_START}m from ping start).${detail}" ;;
     OLD)
       if [ "$RETRY_AFTER_ACTIVE_WINDOW" = "1" ]; then
         local retry_hhmm
         retry_hhmm="$(date -j -f %s $((RESET_EPOCH + RETRY_AFTER_RESET_SEC)) '+%-I:%M%p' 2>/dev/null | tr '[:upper:]' '[:lower:]')"
-        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); scheduling retry for ${retry_hhmm}"
+        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT_FROM_START}m from ping start); scheduling retry for ${retry_hhmm}"
       else
-        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); retry disabled (RETRY_AFTER_ACTIVE_WINDOW=0)"
+        log "${tag}OLD WINDOW ACTIVE: current window resets at ${RESET_HHMM} (in ${MINS_LEFT_FROM_START}m from ping start); retry disabled (RETRY_AFTER_ACTIVE_WINDOW=0)"
       fi ;;
     USED)
-      log "${tag}USED EXISTING WINDOW: current window resets at ${RESET_HHMM} (in ${MINS_LEFT}m); no retry (mid-window)" ;;
+      log "${tag}USED EXISTING WINDOW: current window resets at ${RESET_HHMM} (in ${MINS_LEFT_FROM_START}m from ping start); no retry (mid-window)" ;;
     UNCONFIRMED)
       log "${tag}PING SENT (UNCONFIRMED): Claude replied but could not read /usage reset time. Verify with /usage. Snippet: ${SNIPPET:-(none)}" ;;
     FAIL_TIMEOUT)
