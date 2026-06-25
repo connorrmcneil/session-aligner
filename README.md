@@ -369,7 +369,8 @@ not automate login. If a ping fails with "not logged in", open a terminal, run
 `claude`, then `/login`. To check ahead of time, run `session-aligner auth status`
 (a safe, local check that never sends a prompt) or look at the `Auth:` line in
 `session-aligner report` — it warns when the last ping failed to log in or when
-auth hasn't been verified by a successful ping in 7+ days.
+auth hasn't been verified by a successful ping in 7+ days. For best results, run
+`session-aligner report` occasionally to confirm auth is still healthy.
 
 ## Troubleshooting
 

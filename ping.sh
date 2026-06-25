@@ -263,14 +263,29 @@ PY
   EXIT_CODE=0
 }
 
+# Update one KEY="value" in the state file, preserving the other keys (so the
+# last-OK and last-failure markers coexist). Shell-safe key=value, read by
+# aligner.sh with grep - never sourced.
+state_set() {
+  local key="$1" val="$2" tmp
+  tmp="$(mktemp "${STATE_FILE}.XXXXXX" 2>/dev/null)" || tmp="${STATE_FILE}.tmp.$$"
+  [ -f "$STATE_FILE" ] && grep -v "^${key}=" "$STATE_FILE" 2>/dev/null > "$tmp"
+  echo "${key}=\"${val}\"" >> "$tmp"
+  mv "$tmp" "$STATE_FILE" 2>/dev/null || rm -f "$tmp" 2>/dev/null || true
+}
+
 # Record last known-good auth. A FRESH/OLD/USED outcome means Claude replied and
-# we read /usage, so authentication definitely worked just now. Written as a
-# shell-safe key=value file (read with grep, never sourced).
+# we read /usage, so authentication definitely worked just now.
 record_auth_ok() {
-  {
-    echo "LAST_AUTH_OK_EPOCH=\"$(date +%s)\""
-    echo "LAST_AUTH_OK_TEXT=\"${PING_OUTCOME} (resets at ${RESET_HHMM:-unknown})\""
-  } > "$STATE_FILE" 2>/dev/null || true
+  state_set LAST_AUTH_OK_EPOCH "$(date +%s)"
+  state_set LAST_AUTH_OK_TEXT "${PING_OUTCOME} (resets at ${RESET_HHMM:-unknown})"
+}
+
+# Record a login/auth failure (a ping that failed specifically because Claude
+# Code was not logged in).
+record_auth_failure() {
+  state_set LAST_AUTH_FAILURE_EPOCH "$(date +%s)"
+  state_set LAST_AUTH_FAILURE_TEXT "not logged in"
 }
 
 # Human-readable duration: 45s, 4m12s, 34m.
@@ -295,8 +310,12 @@ log_outcome() {
   if [ "${PING_DURATION_SEC:-0}" -gt 180 ]; then
     log "${tag}WARNING: ping took $(fmt_duration "$PING_DURATION_SEC") to complete; classification based on ping start time"
   fi
-  # Any successful classification proves auth worked - stamp the known-good marker.
-  case "$PING_OUTCOME" in FRESH|OLD|USED) record_auth_ok ;; esac
+  # Any successful classification proves auth worked; a not-logged-in failure
+  # records the auth lapse. Both update the state file (preserving each other).
+  case "$PING_OUTCOME" in
+    FRESH|OLD|USED) record_auth_ok ;;
+    FAIL_LOGIN)     record_auth_failure ;;
+  esac
   local detail=""
   [ -n "$TOKENS_LINE" ] && detail=" TOKENS: ${TOKENS_LINE}"
   case "$PING_OUTCOME" in

@@ -665,6 +665,12 @@ cmd_setup() {
   echo "This tool starts Claude's 5-hour window at times you choose, by sending a"
   echo "tiny interactive Claude Code ping. It does NOT increase your usage limit."
   echo
+  echo "Session Aligner uses your normal Claude Code login. It does not store your"
+  echo "Claude password and cannot automate login. Claude Code may occasionally"
+  echo "require you to sign in again. If a ping fails with \"not logged in\", open a"
+  echo "terminal, run \"claude\", then run \"/login\". You can check auth health later"
+  echo "with \"${CMD_NAME} auth status\" or \"${CMD_NAME} report\"."
+  echo
   echo "Recommended window start times:"
   echo "    05:00 10:00 15:00"
   echo
@@ -720,6 +726,9 @@ cmd_setup() {
 
   echo
   echo "Setup complete."
+  echo
+  echo "Before relying on overnight pings, run: ${CMD_NAME} test"
+  echo "(this confirms Claude Code is logged in and a window actually starts)."
   echo
   echo "Try:"
   echo "    ${CMD_NAME} status"
@@ -961,6 +970,8 @@ cmd_auth() {
       else
         printf '%-15s %s\n' "Last auth OK:" "(never recorded - run '${CMD_NAME} test')"
       fi
+      local fepoch; fepoch="$(state_get LAST_AUTH_FAILURE_EPOCH || true)"
+      [ -n "$fepoch" ] && printf '%-15s %s\n' "Last failure:" "$(date -r "$fepoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
       echo
 
       case "$state" in
@@ -1052,6 +1063,10 @@ cmd_report() {
   local auth_ok_epoch; auth_ok_epoch="$(state_get LAST_AUTH_OK_EPOCH || true)"
   if [ -n "$auth_ok_epoch" ]; then
     printf '%-15s %s\n' "Last auth OK:" "$(date -r "$auth_ok_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+  fi
+  local auth_fail_epoch; auth_fail_epoch="$(state_get LAST_AUTH_FAILURE_EPOCH || true)"
+  if [ -n "$auth_fail_epoch" ]; then
+    printf '%-18s %s\n' "Last auth failure:" "$(date -r "$auth_fail_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
   fi
 
   # ---- Warnings (informational only; never change the exit code) ----
@@ -1203,6 +1218,21 @@ cmd_doctor() {
 
   if [ -f "$CONFIG_FILE" ]; then pass "config found (${TIMES}, $(human_days "$DAYS"))"
   else warng "no config yet - defaults will be used (${DEFAULT_TIMES})" "Run: ${CMD_NAME} setup"; fi
+
+  # Auth health, from known state/logs (no prompt, no window started).
+  local sig astate aok
+  sig="$(last_ping_auth_signal)"
+  astate="$(auth_state)"
+  aok="$(state_get LAST_AUTH_OK_EPOCH || true)"
+  if [ "$sig" = "fail" ]; then
+    warng "last ping failed: not logged in" "Run 'claude' then '/login', then: ${CMD_NAME} test"
+  elif [ -n "$aok" ] && [ $(( ( $(date +%s) - aok ) / 86400 )) -ge "$AUTH_STALE_DAYS" ]; then
+    warng "auth not verified in ${AUTH_STALE_DAYS}+ days" "Run 'claude' then '/usage', or: ${CMD_NAME} test"
+  elif [ "$astate" = "unknown" ]; then
+    warng "auth state unknown" "Run: ${CMD_NAME} test (or 'claude' then '/usage')"
+  else
+    pass "auth looks OK ($(auth_label))"
+  fi
 
   echo
   if [ "${#problems[@]}" -eq 0 ]; then
