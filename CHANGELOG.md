@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.1 - Classification accuracy fix
+
+* Fixed window freshness classification to use the ping **start** time instead of
+  the completion/parse time. A slow ping (busy/clamshell Mac, long reply, late
+  `/usage` parse) no longer mislabels a window that started fresh as
+  `USED EXISTING WINDOW`.
+* Added a `WARNING` when a ping takes over 180 seconds to complete, noting that
+  classification is based on ping start time.
+* Added the `FORCE_START_EPOCH` test hook for late-parse / long-duration runs.
+
 ## v0.1.0 - Initial working release
 
 * Added scheduled Claude Code pings at configured window start times.
