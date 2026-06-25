@@ -4,6 +4,9 @@
 # Wake-scheduler single-instance lock (transient; cleaned on exit)
 .wake-schedule.lock/
 
+# Last known-good auth marker (runtime state)
+.session-aligner-state
+
 # macOS
 .DS_Store
 

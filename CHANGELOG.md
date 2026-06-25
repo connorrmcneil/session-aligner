@@ -1,5 +1,15 @@
 # Changelog
 
+## v0.1.2 - Auth health checks
+
+* Added an `Auth:` line to `session-aligner report` (OK / needs login / unknown).
+* Added `session-aligner auth status` (alias `auth check`) - a lightweight,
+  non-prompting check of local Claude Code credentials. It never automates login.
+* `report` now warns when the last ping failed because Claude Code was not logged
+  in, and when auth hasn't been verified by a successful ping in 7+ days.
+* Track last known-good auth in a `.session-aligner-state` file (written on a
+  successful ping) and show "Last auth OK" in `report` and `auth status`.
+
 ## v0.1.1 - Classification accuracy fix
 
 * Fixed window freshness classification to use the ping **start** time instead of

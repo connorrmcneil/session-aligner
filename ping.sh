@@ -22,6 +22,9 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 LOG_FILE="${SCRIPT_DIR}/aligner.log"
 EXP_SCRIPT="${SCRIPT_DIR}/ping.exp"
 CONFIG_FILE="${SCRIPT_DIR}/aligner.config"
+# Last known-good auth marker (written on a successful ping, read by `report`/
+# `auth status`). A successful ping proves Claude Code was authenticated.
+STATE_FILE="${SCRIPT_DIR}/.session-aligner-state"
 
 # Retry-after-reset behaviour (config-driven). After a ping, we read the /usage
 # reset time to tell whether a FRESH 5-hour window actually started. If the OLD
@@ -260,6 +263,16 @@ PY
   EXIT_CODE=0
 }
 
+# Record last known-good auth. A FRESH/OLD/USED outcome means Claude replied and
+# we read /usage, so authentication definitely worked just now. Written as a
+# shell-safe key=value file (read with grep, never sourced).
+record_auth_ok() {
+  {
+    echo "LAST_AUTH_OK_EPOCH=\"$(date +%s)\""
+    echo "LAST_AUTH_OK_TEXT=\"${PING_OUTCOME} (resets at ${RESET_HHMM:-unknown})\""
+  } > "$STATE_FILE" 2>/dev/null || true
+}
+
 # Human-readable duration: 45s, 4m12s, 34m.
 fmt_duration() {
   local s="$1" m
@@ -282,6 +295,8 @@ log_outcome() {
   if [ "${PING_DURATION_SEC:-0}" -gt 180 ]; then
     log "${tag}WARNING: ping took $(fmt_duration "$PING_DURATION_SEC") to complete; classification based on ping start time"
   fi
+  # Any successful classification proves auth worked - stamp the known-good marker.
+  case "$PING_OUTCOME" in FRESH|OLD|USED) record_auth_ok ;; esac
   local detail=""
   [ -n "$TOKENS_LINE" ] && detail=" TOKENS: ${TOKENS_LINE}"
   case "$PING_OUTCOME" in
