@@ -13,7 +13,7 @@
 set -u
 
 # Bump on each release. Surfaced by `version`/`--version`/`-v` and `report`.
-VERSION="0.1.1"
+VERSION="0.1.2"
 
 # Resolve the real folder this script lives in, even when invoked through the
 # /usr/local/bin/session-aligner symlink (so ping.sh, ping.exp, schedule-wakes.sh,
@@ -57,6 +57,12 @@ PREFLIGHT_LABEL="com.sessionaligner.preflight"
 PREFLIGHT_PLIST_FILE="${HOME}/Library/LaunchAgents/${PREFLIGHT_LABEL}.plist"
 PREFLIGHT_SCRIPT="${SCRIPT_DIR}/preflight-awake.sh"
 PREFLIGHT_LOG="${SCRIPT_DIR}/preflight.log"
+
+# Last known-good auth marker (written by ping.sh on a successful ping).
+STATE_FILE="${SCRIPT_DIR}/.session-aligner-state"
+
+# Warn if auth hasn't been verified by a successful ping in this many days.
+AUTH_STALE_DAYS=7
 
 # Where install.sh puts the global command (used by uninstall).
 SELF_LINK="/usr/local/bin/session-aligner"
@@ -659,6 +665,12 @@ cmd_setup() {
   echo "This tool starts Claude's 5-hour window at times you choose, by sending a"
   echo "tiny interactive Claude Code ping. It does NOT increase your usage limit."
   echo
+  echo "Session Aligner uses your normal Claude Code login. It does not store your"
+  echo "Claude password and cannot automate login. Claude Code may occasionally"
+  echo "require you to sign in again. If a ping fails with \"not logged in\", open a"
+  echo "terminal, run \"claude\", then run \"/login\". You can check auth health later"
+  echo "with \"${CMD_NAME} auth status\" or \"${CMD_NAME} report\"."
+  echo
   echo "Recommended window start times:"
   echo "    05:00 10:00 15:00"
   echo
@@ -714,6 +726,9 @@ cmd_setup() {
 
   echo
   echo "Setup complete."
+  echo
+  echo "Before relying on overnight pings, run: ${CMD_NAME} test"
+  echo "(this confirms Claude Code is logged in and a window actually starts)."
   echo
   echo "Try:"
   echo "    ${CMD_NAME} status"
@@ -874,6 +889,119 @@ stale_wake_times() {
   done
 }
 
+# ---------- auth health ----------
+
+# Read a value from the state file by key (never source it). Echoes the value or
+# nothing.
+state_get() {
+  [ -f "$STATE_FILE" ] || return 1
+  grep -E "^$1=" "$STATE_FILE" 2>/dev/null | tail -n1 | sed -E "s/^$1=\"?([^\"]*)\"?.*/\1/"
+}
+
+# Safe, NON-prompting check for whether Claude Code credentials exist locally.
+# Echoes: present | absent | unknown. Never sends a prompt and never reads the
+# secret value (so macOS doesn't pop a keychain-access dialog).
+claude_creds_present() {
+  # File-based credentials (some installs / non-macOS).
+  if [ -f "${HOME}/.claude/.credentials.json" ]; then echo "present"; return; fi
+  # macOS keychain: query by service only (no -w/-g), so we read attributes, not
+  # the secret. Exit 0 = item exists, non-zero = not found.
+  if [ "$(uname -s)" = "Darwin" ] && command -v security >/dev/null 2>&1; then
+    if security find-generic-password -s "Claude Code-credentials" >/dev/null 2>&1; then
+      echo "present"
+    else
+      echo "absent"
+    fi
+    return
+  fi
+  echo "unknown"
+}
+
+# Ground-truth auth signal from the most recent relevant ping log line.
+# Echoes: ok | fail | none. Only a "not logged in" failure counts as an auth
+# failure (timeouts/network errors are not auth problems).
+last_ping_auth_signal() {
+  [ -f "$LOG_FILE" ] || { echo "none"; return; }
+  local line
+  line="$(grep -E 'FRESH WINDOW STARTED|OLD WINDOW ACTIVE|USED EXISTING WINDOW|FAILURE: not logged in' "$LOG_FILE" 2>/dev/null | tail -n1)"
+  [ -z "$line" ] && { echo "none"; return; }
+  case "$line" in
+    *"not logged in"*) echo "fail" ;;
+    *) echo "ok" ;;
+  esac
+}
+
+# Overall auth state, combining the ground-truth log signal with the safe local
+# credential check. Echoes: ok | needs-login | unknown.
+auth_state() {
+  local sig creds
+  sig="$(last_ping_auth_signal)"
+  creds="$(claude_creds_present)"
+  # A recent "not logged in" failure is authoritative (covers an expired token
+  # even when the keychain item still exists).
+  if [ "$sig" = "fail" ]; then echo "needs-login"; return; fi
+  case "$creds" in
+    present) echo "ok" ;;
+    absent)  echo "needs-login" ;;
+    *) # creds unknown - lean on the log: a recent success means auth worked.
+       if [ "$sig" = "ok" ]; then echo "ok"; else echo "unknown"; fi ;;
+  esac
+}
+
+# Friendly one-word label for the Auth: line.
+auth_label() {
+  case "$(auth_state)" in
+    ok)          echo "OK" ;;
+    needs-login) echo "needs login" ;;
+    *)           echo "unknown" ;;
+  esac
+}
+
+cmd_auth() {
+  case "${1:-status}" in
+    status|check)
+      local state lbl epoch
+      state="$(auth_state)"; lbl="$(auth_label)"
+      printf '%-15s %s\n' "Auth:" "$lbl"
+
+      epoch="$(state_get LAST_AUTH_OK_EPOCH || true)"
+      if [ -n "$epoch" ]; then
+        printf '%-15s %s\n' "Last auth OK:" "$(date -r "$epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+      else
+        printf '%-15s %s\n' "Last auth OK:" "(never recorded - run '${CMD_NAME} test')"
+      fi
+      local fepoch; fepoch="$(state_get LAST_AUTH_FAILURE_EPOCH || true)"
+      [ -n "$fepoch" ] && printf '%-15s %s\n' "Last failure:" "$(date -r "$fepoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+      echo
+
+      case "$state" in
+        ok)
+          echo "Claude Code credentials are present. Note: this is a local check -"
+          echo "it can't detect an expired token. The ground truth is a real ping;"
+          echo "'${CMD_NAME} report' flags it if the last ping failed to log in."
+          ;;
+        needs-login)
+          echo "Claude Code needs login. Open a terminal and run:"
+          echo "    claude"
+          echo "then '/login' if prompted. Session Aligner never automates login."
+          ;;
+        *)
+          echo "Could not safely determine auth state without sending a prompt."
+          echo "To check manually, open a terminal and run:"
+          echo "    claude"
+          echo "then '/usage' (or '/login' if prompted)."
+          ;;
+      esac
+      # Informational only.
+      return 0
+      ;;
+    *)
+      echo "Usage: ${CMD_NAME} auth status   (alias: auth check)" >&2
+      exit 1
+      ;;
+  esac
+}
+
 # A fuller health summary than `status`: quick to scan, with a warnings section.
 # Always exits 0 (informational) - warnings do not make it fail.
 cmd_report() {
@@ -907,6 +1035,7 @@ cmd_report() {
 
   if [ -n "$cpath" ]; then printf '%-15s %s\n' "Claude Code:" "found at $cpath"
   else printf '%-15s %s\n' "Claude Code:" "NOT found (install it and run /login)"; fi
+  printf '%-15s %s\n' "Auth:" "$(auth_label)"
   if [ "$on_ac" -eq 1 ]; then printf '%-15s %s\n' "Power:" "plugged in"
   else printf '%-15s %s\n' "Power:" "on battery"; fi
 
@@ -931,6 +1060,15 @@ cmd_report() {
     printf '%-15s %s\n' "Recent pings:" "(none yet)"
   fi
 
+  local auth_ok_epoch; auth_ok_epoch="$(state_get LAST_AUTH_OK_EPOCH || true)"
+  if [ -n "$auth_ok_epoch" ]; then
+    printf '%-15s %s\n' "Last auth OK:" "$(date -r "$auth_ok_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+  fi
+  local auth_fail_epoch; auth_fail_epoch="$(state_get LAST_AUTH_FAILURE_EPOCH || true)"
+  if [ -n "$auth_fail_epoch" ]; then
+    printf '%-18s %s\n' "Last auth failure:" "$(date -r "$auth_fail_epoch" '+%Y-%m-%d %H:%M' 2>/dev/null)"
+  fi
+
   # ---- Warnings (informational only; never change the exit code) ----
   local warnings=() stale
   [ "$sched_on" = "OFF" ]    && warnings+=("Schedule is OFF; pings won't fire. Run '${CMD_NAME} start'.")
@@ -946,6 +1084,19 @@ cmd_report() {
     USED-EXISTING) warnings+=("Last ping only USED an existing window (no fresh window started).") ;;
     OLD-WINDOW)    warnings+=("Last ping hit an OLD window still active; a retry should have followed - check '${CMD_NAME} logs ping'.") ;;
   esac
+
+  # ---- Auth warnings ----
+  if [ "$(last_ping_auth_signal)" = "fail" ]; then
+    warnings+=("Auth warning: last ping failed because Claude Code was not logged in. Run 'claude' then '/login'.")
+  elif [ "$(auth_state)" = "needs-login" ]; then
+    warnings+=("Claude Code appears not logged in. Run 'claude' then '/login'.")
+  fi
+  if [ -n "$auth_ok_epoch" ]; then
+    local age_days; age_days=$(( ( $(date +%s) - auth_ok_epoch ) / 86400 ))
+    if [ "$age_days" -ge "$AUTH_STALE_DAYS" ]; then
+      warnings+=("Auth has not been verified in ${AUTH_STALE_DAYS}+ days. Run 'claude' then '/usage' or run '${CMD_NAME} test'.")
+    fi
+  fi
 
   if [ "$wake_on" = "ON" ]; then
     stale="$(stale_wake_times | paste -sd, - | sed 's/,/, /g')"
@@ -1068,6 +1219,21 @@ cmd_doctor() {
   if [ -f "$CONFIG_FILE" ]; then pass "config found (${TIMES}, $(human_days "$DAYS"))"
   else warng "no config yet - defaults will be used (${DEFAULT_TIMES})" "Run: ${CMD_NAME} setup"; fi
 
+  # Auth health, from known state/logs (no prompt, no window started).
+  local sig astate aok
+  sig="$(last_ping_auth_signal)"
+  astate="$(auth_state)"
+  aok="$(state_get LAST_AUTH_OK_EPOCH || true)"
+  if [ "$sig" = "fail" ]; then
+    warng "last ping failed: not logged in" "Run 'claude' then '/login', then: ${CMD_NAME} test"
+  elif [ -n "$aok" ] && [ $(( ( $(date +%s) - aok ) / 86400 )) -ge "$AUTH_STALE_DAYS" ]; then
+    warng "auth not verified in ${AUTH_STALE_DAYS}+ days" "Run 'claude' then '/usage', or: ${CMD_NAME} test"
+  elif [ "$astate" = "unknown" ]; then
+    warng "auth state unknown" "Run: ${CMD_NAME} test (or 'claude' then '/usage')"
+  else
+    pass "auth looks OK ($(auth_label))"
+  fi
+
   echo
   if [ "${#problems[@]}" -eq 0 ]; then
     echo "No problems found."
@@ -1178,6 +1344,7 @@ Usage:
   ${CMD_NAME} setup
   ${CMD_NAME} status
   ${CMD_NAME} report                 (full health summary + warnings)
+  ${CMD_NAME} auth status            (check Claude Code login; alias: auth check)
   ${CMD_NAME} version | --version | -v
   ${CMD_NAME} test
   ${CMD_NAME} times "05:00 10:00 15:00"
@@ -1217,6 +1384,7 @@ case "${1:-}" in
   status)       shift; cmd_status "${1:-}" ;;
   wake)         shift; cmd_wake "$@" ;;
   retry)        shift; cmd_retry "$@" ;;
+  auth)         shift; cmd_auth "$@" ;;
   report)       cmd_report ;;
   version|--version|-v) cmd_version ;;
   next)         cmd_next ;;

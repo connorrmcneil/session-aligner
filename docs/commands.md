@@ -18,7 +18,8 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner status` | Friendly overview of schedule + health | No |
 | `session-aligner status --raw` | Same as status, plus raw `pmset` output | No |
 | `session-aligner report` | Full health summary + warnings (best quick check) | No |
-| `session-aligner version` / `--version` / `-v` | Print the version (`session-aligner 0.1.0`) | No |
+| `session-aligner auth status` / `auth check` | Check Claude Code login (safe, local, no prompt) | No |
+| `session-aligner version` / `--version` / `-v` | Print the version (`session-aligner 0.1.2`) | No |
 | `session-aligner test` | Send one tiny ping right now | No |
 | `session-aligner times "..."` | Change window start times | No |
 | `session-aligner start` | Turn the schedule ON | No |
@@ -233,9 +234,42 @@ session-aligner report
 
 ---
 
+### `session-aligner auth status`
+
+**What it does:** Reports whether Claude Code is logged in, as `Auth: OK`,
+`Auth: needs login`, or `Auth: unknown`, plus the last time a ping successfully
+authenticated (`Last auth OK`). Alias: `session-aligner auth check`.
+
+The check is deliberately **lightweight and safe**: it looks at local Claude Code
+credential state (the macOS Keychain item, or a credentials file) and the most
+recent ping outcome in the log. It **never sends a prompt** and never starts a
+usage window, so it costs nothing and won't open a 5-hour window. If it can't
+determine the state safely, it reports `unknown` and tells you to run `claude` then
+`/usage` (or `/login` if prompted).
+
+A local "OK" means credentials are present but can't prove the token hasn't
+expired — the ground truth is a real ping. `session-aligner report` covers that: it
+warns when the **last ping** failed to log in, and when auth hasn't been verified by
+a successful ping in 7+ days. Last known-good auth is tracked in a small
+`.session-aligner-state` file written on each successful ping.
+
+Session Aligner **never automates login** — by design, logging in stays manual.
+
+**When to use it:** Before relying on overnight pings, or any time `report` shows an
+auth warning.
+
+**Example:**
+
+```bash
+session-aligner auth status
+session-aligner auth check     # same thing
+```
+
+---
+
 ### `session-aligner version`
 
-**What it does:** Prints the version, e.g. `session-aligner 0.1.0`. Also available as
+**What it does:** Prints the version, e.g. `session-aligner 0.1.2`. Also available as
 `--version` and `-v`.
 
 **Example:**

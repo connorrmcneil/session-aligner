@@ -205,6 +205,7 @@ for reliable wakes with the lid closed (see the power table below).
 | Turn the schedule back ON | `session-aligner start` |
 | See a friendly status overview | `session-aligner status` |
 | **Quick health check (best one)** | `session-aligner report` |
+| Check Claude Code login | `session-aligner auth status` |
 | Show the version | `session-aligner --version` |
 | See the next window start + wake | `session-aligner next` |
 | Diagnose problems | `session-aligner doctor` |
@@ -362,6 +363,14 @@ For best reliability, keep the Mac plugged in overnight, especially in clamshell
 mode. macOS may delay scheduled wakes or LaunchAgent jobs when the lid is closed
 and the Mac is on battery. `session-aligner report` warns you when the Mac is on
 battery so you can catch this before it causes a missed window.
+
+Claude Code may occasionally require re-login. Session Aligner cannot and should
+not automate login. If a ping fails with "not logged in", open a terminal, run
+`claude`, then `/login`. To check ahead of time, run `session-aligner auth status`
+(a safe, local check that never sends a prompt) or look at the `Auth:` line in
+`session-aligner report` — it warns when the last ping failed to log in or when
+auth hasn't been verified by a successful ping in 7+ days. For best results, run
+`session-aligner report` occasionally to confirm auth is still healthy.
 
 ## Troubleshooting
 
