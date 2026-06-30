@@ -20,7 +20,7 @@ did not run `./install.sh`, use `./aligner.sh` instead from the project folder
 | `session-aligner report` | Full health summary + warnings (best quick check) | No |
 | `session-aligner auth status` / `auth check` | Check Claude Code login (safe, local, no prompt) | No |
 | `session-aligner version` / `--version` / `-v` | Print the version (`session-aligner 0.1.2`) | No |
-| `session-aligner test` | Send one tiny ping right now | No |
+| `session-aligner test` | Send one **real** tiny ping now (may start a window) | No |
 | `session-aligner times "..."` | Change window start times | No |
 | `session-aligner start` | Turn the schedule ON | No |
 | `session-aligner stop` | Turn the schedule OFF | No |
@@ -159,11 +159,14 @@ session-aligner start
 
 ### `session-aligner test`
 
-**What it does:** Sends one tiny interactive Claude Code ping right now. This
-starts (or continues) a Claude 5-hour window immediately.
+**What it does:** Sends one **real** tiny interactive Claude Code ping right now —
+it opens a real Claude Code session, types "hi", and reads `/usage`. Because it is a
+real ping, it **may start (or continue) a Claude 5-hour usage window immediately**.
+It is not a dry run.
 
 **When to use it:** Verify Claude Code is logged in, `expect` works, and pings
-succeed before relying on the schedule.
+succeed before relying on the schedule — especially before depending on overnight
+pings.
 
 **Example:**
 
@@ -173,8 +176,11 @@ session-aligner test
 
 **Notes:**
 
-- Check `aligner.log` or `session-aligner logs ping` for `SUCCESS` and `TOKENS:`
-  lines as proof the ping worked.
+- Check `aligner.log` or `session-aligner logs ping` for the outcome
+  (`FRESH WINDOW STARTED` / `USED EXISTING WINDOW`) and the `TOKENS:` line as proof
+  the ping worked.
+- If Claude Code asks you to sign in, **login is manual**: run `claude`, then
+  `/login`. Session Aligner never automates login.
 - Does not need admin access.
 
 ---

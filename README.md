@@ -1,17 +1,31 @@
 # Session Aligner (macOS)
 
-Claude's 5-hour session window starts the moment you send your first message and
-resets exactly 5 hours later. This little tool sends one tiny "ping" to Claude
-Code at times you choose (for example 5:00, 10:00, and 3:00), so a fresh 5-hour
-window begins right when you want to start working. That's it.
+**Session Aligner is a macOS helper for Claude Code that schedules tiny
+interactive pings so your normal Claude Code usage windows start at times you
+choose** (for example 5:00, 10:00, and 3:00). Claude's 5-hour window starts the
+moment you send your first message and resets exactly 5 hours later — this tool
+sends that first "hi" for you, on a schedule, so a fresh window begins right when
+you want to start working.
 
-**Important:** This does NOT give you more usage. It does not increase or extend
-the 5-hour limit or your weekly cap. It only controls *when* a 5-hour window
-starts, so the windows line up with your day instead of starting at random times.
+**It does not bypass, extend, or increase Claude limits.** It only helps align
+normal Claude Code windows with your schedule — it does not give extra usage and
+does not change the 5-hour limit or your weekly cap.
 
 It uses your normal Claude Code login (the same account you already use). No API
 key and no programming required. The schedule runs through macOS `launchd`, which
 survives reboots and can run a missed ping when your Mac wakes from sleep.
+
+## Who this is for
+
+Claude Code users who want their normal usage windows to start at **predictable
+times** instead of whenever they happen to send their first message — for example:
+
+- a window ready **before work** so you're not waiting on a fresh one mid-morning,
+- windows aligned to **planned coding blocks**, or
+- the common **5 AM / 10 AM / 3 PM** cadence that spreads three windows across a day.
+
+If you just want your Claude windows to line up with your day, this is for you. It
+will not help you exceed Claude's limits — that is not what it does.
 
 ## TL;DR
 
@@ -91,22 +105,48 @@ A few things that are surprising at first but important to understand:
 
 ## What you need first
 
-- Claude Code installed and logged in. Open a terminal, type `claude`, and if it
-  asks you to sign in, run `/login` once. After that you're set.
+- Claude Code installed and **logged in**. Open a terminal and run:
 
-## One-time setup (copy/paste)
+  ```bash
+  claude
+  ```
 
-1. Open the Terminal app.
-2. Go to this folder and run the installer:
+  If it asks you to sign in, run `/login` once. Session Aligner uses this same
+  login — it never stores your password and cannot automate `/login`.
+
+## Quick start (copy/paste)
 
 ```bash
-cd /Users/connormcneil/Projects/session-aligner
+# 1. Make sure Claude Code is installed and logged in (see above):
+claude            # then /login if prompted
+
+# 2. Get Session Aligner and install the global command:
+git clone https://github.com/connorrmcneil/session-aligner.git
+cd session-aligner
 ./install.sh
+
+# 3. Pick your window start times (guided), then verify it works:
+session-aligner setup
+session-aligner test     # sends a REAL tiny ping; may start a Claude window now
+session-aligner report   # health summary - look for "Auth: OK" and a recent ping
 ```
 
 The installer makes the scripts runnable, checks requirements (Claude Code,
 `expect`), and creates a global `session-aligner` command so you can run it from
 anywhere. It then offers to run guided setup for you.
+
+### Step by step
+
+The same steps as the copy/paste block above, with a bit more detail:
+
+1. Open the Terminal app.
+2. Clone the repo and run the installer (from the cloned folder):
+
+```bash
+git clone https://github.com/connorrmcneil/session-aligner.git
+cd session-aligner
+./install.sh
+```
 
 > Creating the global command may ask for your Mac password once (because
 > `/usr/local/bin` is owned by the system). If you skip or it can't be created,
@@ -219,9 +259,8 @@ for reliable wakes with the lid closed (see the power table below).
 | Remove everything | `session-aligner uninstall` |
 
 If you didn't run `./install.sh`, use `./aligner.sh` instead of `session-aligner`
-(for example `./aligner.sh status`), run from inside the folder
-`/Users/connormcneil/Projects/session-aligner`. `start`/`stop` are the same as the
-older `on`/`off`, which still work too.
+(for example `./aligner.sh status`), run from inside the cloned `session-aligner`
+folder. `start`/`stop` are the same as the older `on`/`off`, which still work too.
 
 **For a quick health check, run `session-aligner report`.** It's the most useful
 single command: it shows schedule/wake/preflight/retry state, the computed wake
@@ -255,8 +294,29 @@ Other examples:
 
 ## How do I know it's working?
 
-Easiest proof - the log. Every ping now writes its real token usage to
-`aligner.log`:
+Quickest health check - `session-aligner report`. A healthy setup looks like this:
+
+```text
+Session Aligner Report
+Version:        0.1.3
+Schedule:       ON
+Auto-wake:      ON
+Preflight:      ON
+Retry:          ON
+Auth:           OK
+Window starts:  05:00, 10:00, 15:00
+Wake times:     04:45, 09:45, 14:45
+Last ping:      FRESH
+```
+
+`Schedule`/`Auto-wake`/`Preflight`/`Retry` should be `ON`, `Auth:` should be `OK`,
+and `Last ping:` should be `FRESH` (or `USED-EXISTING` if a window was already
+running). `report` also prints a **Warnings** section when something needs
+attention (on battery, last ping failed to log in, auth not verified in 7+ days,
+etc.). Note that `Auth: OK` means your Claude Code credentials *appear* present
+locally — the real proof that auth works is a successful ping (see below).
+
+Easiest proof - the log. Every ping writes its real token usage to `aligner.log`:
 
 1. Run a ping: `session-aligner test`.
 2. Look at the log: `session-aligner logs` (or open `aligner.log`). You should see
@@ -359,18 +419,30 @@ separate agent, `com.sessionaligner.ping`).
 
 ## Known limitations
 
-For best reliability, keep the Mac plugged in overnight, especially in clamshell
-mode. macOS may delay scheduled wakes or LaunchAgent jobs when the lid is closed
-and the Mac is on battery. `session-aligner report` warns you when the Mac is on
-battery so you can catch this before it causes a missed window.
+Read these before relying on Session Aligner unattended:
 
-Claude Code may occasionally require re-login. Session Aligner cannot and should
-not automate login. If a ping fails with "not logged in", open a terminal, run
-`claude`, then `/login`. To check ahead of time, run `session-aligner auth status`
-(a safe, local check that never sends a prompt) or look at the `Auth:` line in
-`session-aligner report` — it warns when the last ping failed to log in or when
-auth hasn't been verified by a successful ping in 7+ days. For best results, run
-`session-aligner report` occasionally to confirm auth is still healthy.
+- **macOS wake behavior is not perfect.** Scheduled wakes (via `pmset`) and
+  `launchd` jobs are best-effort. macOS can delay or skip them, so a ping may land a
+  few minutes late or, occasionally, not at all.
+- **Unplugged / clamshell mode can delay or suspend pings.** With the lid closed on
+  battery, macOS aggressively limits background work and wakes. For best reliability,
+  **keep the Mac plugged in**, especially overnight. `session-aligner report` warns
+  you when the Mac is on battery.
+- **Claude Code may occasionally require manual re-login.** Tokens can expire. When
+  that happens a ping fails with "not logged in" and **Session Aligner cannot
+  automate `/login`** — by design, login stays manual. Open a terminal, run `claude`,
+  then `/login`.
+- **`session-aligner test` sends a real ping.** It opens a real interactive Claude
+  Code session and types "hi", which **may start (or continue) a Claude 5-hour usage
+  window right then**. It is tiny, but it is not a dry run.
+- **`Auth: OK` is a local check, not a guarantee.** It means your Claude Code
+  credentials *appear* present on this Mac; it cannot detect an expired token. The
+  ground truth is a real successful ping — `report` flags it when the last ping
+  failed to log in, or when auth hasn't been verified by a successful ping in 7+ days.
+
+To check auth health ahead of time, run `session-aligner auth status` (a safe, local
+check that never sends a prompt). For best results, run `session-aligner report`
+occasionally to confirm everything — including auth — is still healthy.
 
 ## Troubleshooting
 

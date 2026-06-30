@@ -1,5 +1,8 @@
-# Runtime logs
+# Runtime logs (aligner.log, wake.log, preflight.log, wake.daemon.log, etc.)
 *.log
+
+# User config, written by `setup`/`times` (local to each machine; not shipped)
+aligner.config
 
 # Wake-scheduler single-instance lock (transient; cleaned on exit)
 .wake-schedule.lock/

@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.1.3 - Public-launch polish
+
+* README launch polish: clearer one-line description and a "does not bypass,
+  extend, or increase Claude limits" disclaimer up front.
+* Added a "Who this is for" section and a `git clone` quick start (replacing a
+  hard-coded local path).
+* Expanded "Known limitations": macOS wake reliability, clamshell/battery delays,
+  manual re-login (`/login` is never automated), `session-aligner test` sends a
+  real ping that may start a window, and what "Auth: OK" really means.
+* Added a sample healthy `session-aligner report` output.
+* Stopped tracking the local `aligner.config` (added to `.gitignore`) so a fresh
+  clone starts from built-in defaults instead of someone else's schedule.
+
+No behavior changes (docs/repo polish only).
+
 ## v0.1.2 - Auth health checks
 
 * Added an `Auth:` line to `session-aligner report` (OK / needs login / unknown),

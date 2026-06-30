@@ -13,7 +13,7 @@
 set -u
 
 # Bump on each release. Surfaced by `version`/`--version`/`-v` and `report`.
-VERSION="0.1.2"
+VERSION="0.1.3"
 
 # Resolve the real folder this script lives in, even when invoked through the
 # /usr/local/bin/session-aligner symlink (so ping.sh, ping.exp, schedule-wakes.sh,
