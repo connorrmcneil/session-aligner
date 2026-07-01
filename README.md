@@ -479,12 +479,3 @@ occasionally to confirm everything — including auth — is still healthy.
 
 ---
 
-## Send-to-a-friend summary
-
-> This tool makes Claude's 5-hour clock start when *you* want it to. Claude's
-> session window begins at your first message and lasts 5 hours; this sends a
-> tiny "hi" at set times (like 5am, 10am, 3pm) so a fresh window opens then.
-> It does **not** give you more usage — it just lines the windows up with your
-> day. Install it with `./install.sh`, then to change times run
-> `session-aligner times "07:00 12:00 17:00"`, to pause it run `session-aligner
-> stop`, and to check it run `session-aligner status`.
