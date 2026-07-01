@@ -92,15 +92,12 @@ A few things that are surprising at first but important to understand:
   output tokens were used), and (b) the **"Current session - Resets at H:MM"**
   time, which jumps ~5 hours ahead when a ping starts a fresh window.
 
-> **Honest caveat.** On June 15, 2026 Anthropic changed billing so that *headless*
-> `claude -p` calls no longer start your Pro/Max 5-hour window (they bill a
-> separate metered pool). Only an *interactive* Claude Code session starts that
-> window. So this tool drives the real interactive app through a pseudo-terminal
-> (`expect`) and types "hi". This is the best available way to start the window on
-> a schedule, but it is automating the interactive app: it may be against the
-> spirit of that billing change and Anthropic could stop it working at any time.
-> Always confirm it is working using the log/`/usage` checks below.
-
+> **Compatibility note.** This tool relies on Claude Code's current interactive
+> behavior. Headless `claude -p` calls do not start the normal Claude Code usage
+> window, so Session Aligner uses an interactive Claude Code session through a
+> pseudo-terminal (`expect`) and sends a tiny scheduled "hi" message. If Claude Code
+> or its usage-window behavior changes, Session Aligner may need updates. Always
+> confirm it is working using the log and `/usage` checks below.
 ---
 
 ## What you need first
