@@ -14,7 +14,7 @@ some versions emit `rate_limits: null`, so UNCONFIRMED handling stays).
 
 ## M1 — Tests + CI (safety net; no behavior changes)
 
-- [ ] M1.1 Add bats-core scaffolding: tests/ dir, a helpers.bash that sources
+- [x] M1.1 Add bats-core scaffolding: tests/ dir, a helpers.bash that sources
       individual functions from the scripts without executing their main
       bodies (aligner.sh dispatches at the bottom — source with a guard or
       extract via `sed`), plus a README note in tests/ on how to run.
@@ -213,3 +213,4 @@ defaults to "claude" so existing installs are unchanged.
 
 ## Iteration log
 <!-- Ralph iterations append one line each below. Never edit existing lines. -->
+- 2026-07-12 M1.1: Added tests/ with helpers.bash (awk brace-counting extractor that sources only column-0 function defs, so scripts' top-level side effects/exit don't fire — no production scripts modified), a scaffolding smoke .bats, and tests/README; verified `bats tests/` (5 pass) + `shellcheck`. Gotcha: pre-existing shellcheck findings remain in root scripts (aligner.sh SC2086 L1056; schedule-wakes.sh SC2034 L31, SC1090 L32) — not introduced here, leave for their owning tasks/CI.
