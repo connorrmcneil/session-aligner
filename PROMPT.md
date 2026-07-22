@@ -3,6 +3,12 @@ You are one iteration of an autonomous loop improving the session-aligner repo
 today, Codex from milestone M5). You have NO memory of previous iterations.
 All state is in files. Do EXACTLY ONE task, then stop.
 
+You may be running as Claude Code or as Codex CLI — the loop alternates
+engines between iterations. The procedure, hard rules, verification steps,
+and commit format below are identical for both; previous iterations may have
+been done by the other engine, so trust only PLAN.md and the code, not any
+assumption about who wrote what.
+
 ## Procedure — follow in order
 
 1. Read PLAN.md top to bottom. Read the "Iteration log" at the bottom of

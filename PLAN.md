@@ -63,6 +63,46 @@ some versions emit `rate_limits: null`, so UNCONFIRMED handling stays).
 - [ ] M2.4 Add SECURITY.md describing the threat model and the fix. Bump
       VERSION to 0.2.0, add CHANGELOG entry.
 
+## MB — Battery & background hygiene
+
+Why: on battery, the preflight's `caffeinate -dimsu` lights the display (`-u`
+simulates user activity, `-d` keeps the screen on) and holds the Mac fully
+awake for 20 minutes per wake — a real overnight battery cost. These tasks make
+the tool battery-polite without breaking on-time pings when plugged in.
+
+- [ ] MB.1 Battery-aware preflight: preflight-awake.sh detects power source
+      (copy the `pmset -g batt | grep "AC Power"` pattern from on_ac_power in
+      aligner.sh — the script is standalone, keep it self-contained, and wrap
+      the check in a small function so tests can stub it). On AC: current
+      behavior (caffeinate -dimsu). On battery: drop -d and -u so the display
+      NEVER lights (caffeinate -ims), and cap the hold at
+      min(KEEP_AWAKE_MIN, 10) minutes. Log power state, chosen flags, and
+      duration. Tests via DRY_RUN=1 with the power check stubbed both ways.
+- [ ] MB.2 `wake battery-skip on|off` (config BATTERY_SKIP, default 0, read
+      via the M2.1 safe reader, clamped to 0/1): when 1 and on battery, the
+      preflight logs "skipped caffeinate (on battery, battery-skip on)" and
+      exits without holding; the retry hold in ping.sh likewise degrades from
+      caffeinate to plain `sleep` with a log line. Add the subcommand to
+      cmd_wake in aligner.sh; show the setting in status/report/wake status.
+      Tests for config parsing, both power states, and the ping retry path.
+- [ ] MB.3 Power section in `report`: total caffeinate minutes in the last
+      24h (pair started/finished lines in preflight.log), overnight wakes
+      attributed to the tool (parse `pmset -g log` "Wake from" lines matching
+      configured wake times ±5 min; fixture-driven with canned pmset log
+      output in tests/fixtures/), a lingering-process check
+      (pgrep -fl "caffeinate|expect|ping.sh"), and a warning when an
+      overnight start (00:00-07:00) is configured while on battery with
+      battery-skip off. `doctor` gains the lingering-process check too. Tests.
+- [ ] MB.4 Process hygiene: trap in ping.sh that kills its child
+      expect/claude process group on EXIT/TERM so a killed ping never orphans
+      a pty or a caffeinate; preflight-awake.sh traps to exit cleanly
+      mid-caffeinate. Test with a stub binary that lingers. NEVER invoke the
+      real claude or codex binaries in tests.
+- [ ] MB.5 Docs: README "Known limitations" battery section rewritten around
+      the new behavior (display never lights on battery; battery-skip
+      option), docs/commands.md entries for `wake battery-skip`, CHANGELOG
+      entry.
+
 ## M3 — Correctness bugs
 
 - [ ] M3.1 cmd_times (and the setup path) must rebuild the preflight agent when
